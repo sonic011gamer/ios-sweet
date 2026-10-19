@@ -1,0 +1,11 @@
+name: ping
+on: workflow_dispatch
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uname -a
+  macos:
+    runs-on: macos-14
+    steps:
+      - run: sw_vers
