@@ -1,0 +1,390 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 2545cf9..4c3ccd0 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -20,6 +20,9 @@
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
++#if HAS_GIC_V2
++extern "C" void sweet_gic_send_sgi(unsigned int cpu, unsigned int sgi);
++#endif
+ 
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+@@ -214,6 +217,12 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	if (logical >= topology->num_cpus) {
+ 		panic("SWEET CPU: invalid SGI target %u", logical);
+ 	}
++#if HAS_GIC_V2
++	/* SWEET_T290: GICD_SGIR with the target's recorded CPU interface bit. */
++	sweet_gic_send_sgi(logical, SWEET_IPI_SGI);
++	__builtin_arm_isb(ISB_SY);
++	return;
++#endif
+ 	/* Use the TARGET affinity, including Aff1, never the sender's MPIDR. */
+ 	uint64_t mpidr = topology->cpus[logical].phys_id;
+ 	unsigned int aff0 = mpidr & 0xff;
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 9a748ea..8d51fcc 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -61,7 +61,13 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
++# SWEET_BOARD=t290 (environment): same SWEET config for the SM-T290 tablet,
++# Cortex-A53 = plain ARMv8.0 (no LSE atomics, no PAN, no 16K pages).
++ifeq ($(SWEET_BOARD),t290)
++MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DSWEET_T290=1 -march=armv8-a+crc+crypto
++else
+ MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
++endif
+ 
+ 
+ #
+@@ -337,6 +343,14 @@ ARM64_PLKSEG_ADDR  =0xfffffe0004004000
+ ARM64_LINK_ADDR    =0xfffffe0007004000
+ endif
+ 
++# SWEET_T290: 4K pages give 38-bit kernel and user ranges (T0SZ/T1SZ 26), so
++# keep the iOS kernel layout at -128GB instead of the macOS one at -2TB.
++ifeq ($(SWEET_BOARD),t290)
++LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY
++ARM64_PLKSEG_ADDR  =0xfffffff004004000
++ARM64_LINK_ADDR    =0xfffffff007004000
++endif
++
+ 
+ CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
+ 			$(LARGE_MEMORY_DEFINE) -momit-leaf-frame-pointer -fno-strict-aliasing -D__API__=v4 -mkernel
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..7e301b3 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1861,8 +1861,16 @@ sleh_irq(arm_saved_state_t *state)
+ 	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
+ 	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
+ 	 */
++#if HAS_GIC_V2
++	/* SWEET_T290: memory-mapped GICv2 CPU interface (pe_fiq.c) */
++#define SWEET_GIC_EOI(v) sweet_gic_eoi((uint32_t)(v))
++	uint64_t iar = sweet_gic_ack();
++	uint32_t intid = (uint32_t)(iar & GICC_IAR_INTID_MASK);
++#else
++#define SWEET_GIC_EOI(v) __builtin_arm_wsr64("ICC_EOIR1_EL1", (v))
+ 	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+ 	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
++#endif
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+ 		return; /* spurious */
+@@ -1873,11 +1881,11 @@ sleh_irq(arm_saved_state_t *state)
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		SWEET_GIC_EOI(iar);
+ 	} else if (intid < 16) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		SWEET_GIC_EOI(iar);
+ 		__builtin_arm_isb(ISB_SY);
+ 		cpu_signal_handler();
+ 	} else {
+@@ -1888,9 +1896,10 @@ sleh_irq(arm_saved_state_t *state)
+ 			    cdp->interrupt_nub,
+ 			    intid);
+ 		}
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		SWEET_GIC_EOI(iar);
+ 	}
+ 	__builtin_arm_isb(ISB_SY);
++#undef SWEET_GIC_EOI
+ #else
+ 	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 023086f..1363390 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -306,11 +306,13 @@ LEXT(sweet_secondary_entry)
+ 	mov		x1, #3
+ 	msr		CNTHCTL_EL2, x1
+ 	msr		CNTVOFF_EL2, xzr
++#if HAS_GIC_V3
+ 	/* Permit ICC_SRE_EL1 and GIC CPU interface system-register access. */
+ 	mrs		x1, ICC_SRE_EL2
+ 	orr		x1, x1, #1
+ 	orr		x1, x1, #8
+ 	msr		ICC_SRE_EL2, x1
++#endif /* HAS_GIC_V3 */
+ 	/* Known Armv8 SCTLR RES1 bits, M/C/I off, little endian. */
+ 	MOV64	x1, 0x30d00800
+ 	msr		SCTLR_EL1, x1
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index c013288..1bf5a24 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -133,7 +133,10 @@ extern int PAGE_SHIFT_CONST;
+ 
+ /* system-wide values */
+ #define MACH_VM_MIN_ADDRESS_RAW 0x0ULL
+-#if defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)
++#if defined(SWEET_T290)
++/* 4K pages, T0SZ 26: the iOS user range (fits the 38-bit TTBR0 region). */
++#define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL
++#elif defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)
+ #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+ #else
+ #define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..0bc8d74 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -222,6 +222,142 @@ pe_init_fiq()
+ 	__builtin_arm_isb(ISB_SY);
+ #endif /* SWEET */
+ }
++#elif HAS_GIC_V2
++/*
++ * SWEET_T290: GICv2 with a memory-mapped CPU interface (SDM429 QGIC2, QEMU virt
++ * gic-version=2). DT /arm-io/gic reg = <GICD base, size, GICC base, size>.
++ */
++SECURITY_READ_ONLY_LATE(uint32_t) sweet_vtimer_intid = SWEET_VTIMER_INTID;
++
++static vm_offset_t gicd_base;
++static vm_offset_t gicc_base;
++/* SGIs address CPU interfaces, not MPIDRs: each CPU records its own bit. */
++static uint8_t gic_cpu_mask[MAX_CPUS];
++
++static uint32_t
++_gic_read32(vm_offset_t addr)
++{
++	return *((volatile uint32_t *) addr);
++}
++
++static void
++_gic_write32(vm_offset_t addr, uint32_t value)
++{
++	*((volatile uint32_t *) addr) = value;
++}
++
++#define gicd_read32(offset) (_gic_read32(gicd_base + (offset)))
++#define gicd_write32(offset, data) (_gic_write32(gicd_base + (offset), (data)))
++#define gicc_read32(offset) (_gic_read32(gicc_base + (offset)))
++#define gicc_write32(offset, data) (_gic_write32(gicc_base + (offset), (data)))
++
++void
++pe_init_fiq()
++{
++	int error;
++	DTEntry entry;
++
++	// The boot processor maps the GIC; secondaries must not use SecureDT*.
++	if (!gicd_base) {
++		error = SecureDTLookupEntry(NULL, "/arm-io/gic", &entry);
++		if (error != kSuccess) {
++			panic("%s: cannot find GIC node in DT", __func__);
++		}
++
++		void const *prop;
++		unsigned int prop_size;
++		error = SecureDTGetProperty(entry, "reg", &prop, &prop_size);
++		if (error != kSuccess) {
++			panic("%s: cannot find GIC MMIO regions in DT", __func__);
++		}
++		if (prop_size < 4 * sizeof(uint64_t)) {
++			panic("%s: incorrect reg property size in GIC DT node; expecting 32 bytes but got %u bytes", __func__, prop_size);
++		}
++
++		void const *timer_prop;
++		unsigned int timer_size;
++		if (SecureDTGetProperty(entry, "virtual-timer-intid", &timer_prop, &timer_size) == kSuccess) {
++			if (timer_size != sizeof(uint32_t)) {
++				panic("%s: invalid virtual-timer-intid size %u", __func__, timer_size);
++			}
++			uint32_t intid = *(const uint32_t *)timer_prop;
++			if (intid < 16 || intid >= 32) {
++				panic("%s: virtual timer INTID %u is not a PPI", __func__, intid);
++			}
++			sweet_vtimer_intid = intid;
++		}
++
++		vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
++		uint64_t const *reg = (uint64_t const *) prop;
++
++		gicd_base = ml_io_map(soc_base_phys + reg[0], reg[1]);
++		if (!gicd_base) {
++			panic("%s: cannot map GICD region", __func__);
++		}
++		gicc_base = ml_io_map(soc_base_phys + reg[2], reg[3]);
++		if (!gicc_base) {
++			panic("%s: cannot map GICC region", __func__);
++		}
++		kprintf("SWEET GIC: GICv2 GICD 0x%llx GICC 0x%llx, virtual timer INTID %u
++",
++		    soc_base_phys + reg[0], soc_base_phys + reg[2], sweet_vtimer_intid);
++	}
++
++	/*
++	 * GICD_ITARGETSR0..7 are banked and read back the reading CPU's own
++	 * interface bit; a uniprocessor GIC may return 0 (Linux gic_get_cpumask).
++	 */
++	unsigned int cpu = ml_get_cpu_number_local();
++	uint8_t mask = (uint8_t)gicd_read32(GICD_ITARGETSR0);
++	if (mask == 0) {
++		mask = (uint8_t)(1U << cpu);
++	}
++	if (cpu < MAX_CPUS) {
++		gic_cpu_mask[cpu] = mask;
++	}
++
++	// Banked SGI/PPI state of this CPU: priority, then enable timer + IPI.
++	for (unsigned int i = 0; i < 32; i += 4) {
++		gicd_write32(GICD_IPRIORITYR0 + i, 0xA0A0A0A0);
++	}
++	gicd_write32(GICD_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++
++	gicd_write32(GICD_CTLR, gicd_read32(GICD_CTLR) | GICD_CTLR_ENABLEGRP1);
++
++	gicc_write32(GICC_PMR, 0xFF);
++	gicc_write32(GICC_BPR, 0);
++	uint32_t gicc_ctlr = gicc_read32(GICC_CTLR);
++	gicc_ctlr &= ~GICC_CTLR_EOIMODENS;
++	gicc_ctlr |= GICC_CTLR_ENABLE;
++	gicc_write32(GICC_CTLR, gicc_ctlr);
++	__builtin_arm_dsb(DSB_SY);
++	__builtin_arm_isb(ISB_SY);
++
++	kprintf("SWEET GIC: cpu %u interface mask 0x%x
++", cpu, mask);
++}
++
++uint32_t
++sweet_gic_ack(void)
++{
++	return gicc_read32(GICC_IAR);
++}
++
++void
++sweet_gic_eoi(uint32_t iar)
++{
++	gicc_write32(GICC_EOIR, iar);
++}
++
++void
++sweet_gic_send_sgi(unsigned int cpu, unsigned int sgi)
++{
++	if (cpu >= MAX_CPUS || gic_cpu_mask[cpu] == 0) {
++		panic("%s: no GIC interface known for cpu %u", __func__, cpu);
++	}
++	__builtin_arm_dsb(DSB_ISHST);
++	gicd_write32(GICD_SGIR, ((uint32_t)gic_cpu_mask[cpu] << GICD_SGIR_TARGET_SHIFT) | (sgi & 0xF));
++}
+ #else
+ void
+ pe_init_fiq()
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+index 9004f2b..99f0f88 100644
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -38,6 +38,12 @@ int uart_getc(void);
+ void pe_init_fiq(void);
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ extern uint32_t sweet_vtimer_intid;
++#if defined(SWEET_T290)
++/* GICv2 memory-mapped CPU interface (pexpert/arm/pe_fiq.c) */
++uint32_t sweet_gic_ack(void);
++void sweet_gic_eoi(uint32_t iar);
++void sweet_gic_send_sgi(unsigned int cpu, unsigned int sgi);
++#endif
+ #endif
+ 
+ #ifdef PRIVATE
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index b99c2f4..d524a21 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -17,13 +17,24 @@
+ 
+ #define SWEET                     1
+ 
++/*
++ * SWEET_T290 (make SWEET_BOARD=t290, see MakeInc.def): the same SWEET kernel
++ * for the Samsung Galaxy Tab A 8.0 2019 (SM-T290, Qualcomm SDM429): four
++ * Cortex-A53 (ARMv8.0: no 16K translation granule, no PAN, no LSE) and a
++ * GICv2 (QGIC2). 4K pages like Apple's BCM2837 (Raspberry Pi 3) config.
++ */
++
+ /*
+  * All eight cores (six A55 + two A76) as one homogeneous SMP cluster:
+  * cpus=N is clamped here. Same ISA level (ARMv8.2), 64-byte lines, PSCI
+  * CPU_ON; the scheduler does not know the A76s are faster (no AMP/P-E
+  * clusters yet).
+  */
++#if SWEET_T290
++#define SWEET_SMP_MAX_CPUS         4
++#else
+ #define SWEET_SMP_MAX_CPUS         8
++#endif
+ 
+ #define ARM_ARCH_TIMER
+ #define __ARM_ARCH__              8
+@@ -33,10 +44,15 @@
+ #define __ARM_DEBUG__             7
+ #define __ARM_ENABLE_SWAP__       1
+ #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
++#if SWEET_T290
++#define __ARM64_PMAP_SUBPAGE_L1__ 1
++#define HAS_GIC_V2                1
++#else
+ #define __ARM_PAN_AVAILABLE__     1
+ #define __ARM_16K_PG__            1
+ 
+ #define HAS_GIC_V3                1
++#endif /* SWEET_T290 */
+ 
+ #ifndef ASSEMBLER
+ #define PLATFORM_PANIC_LOG_DISABLED
+@@ -47,7 +63,12 @@
+  * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
+  * (CNTV) is INTID 16 + 3 = 19.
+  */
++#if SWEET_T290
++/* SDM429 (msm8937.dtsi timer: <1 2>, <1 3>, <1 4>, <1 1>): CNTV is PPI 4 = INTID 20. */
++#define SWEET_VTIMER_INTID        20
++#else
+ #define SWEET_VTIMER_INTID        19
++#endif
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+@@ -80,4 +101,26 @@
+ #define ICC_SRE_SRE                             0x1
+ /* End of GICv3 register definitions */
+ 
++#if HAS_GIC_V2
++/*
++ * GICv2 (Arm IHI 0048B), non-secure view: Linux on SDM429 only sets the enable
++ * bit 0 of GICD_CTLR and GICC_CTLR, groups belong to the secure firmware. On
++ * QEMU virt (no security extensions) bit 0 enables Group 0, signalled as IRQ.
++ */
++#define GICD_ISENABLER0                         0x100
++#define GICD_IPRIORITYR0                        0x400
++#define GICD_ITARGETSR0                         0x800
++#define GICD_SGIR                               0xF00
++#define GICD_SGIR_TARGET_SHIFT                  16
++
++#define GICC_CTLR                               0x00
++#define GICC_PMR                                0x04
++#define GICC_BPR                                0x08
++#define GICC_IAR                                0x0C
++#define GICC_EOIR                               0x10
++#define GICC_CTLR_ENABLE                        0x1
++#define GICC_CTLR_EOIMODENS                     0x200
++#define GICC_IAR_INTID_MASK                     0x3FF
++#endif /* HAS_GIC_V2 */
++
+ #endif /* ! _PEXPERT_ARM64_SWEET_H */

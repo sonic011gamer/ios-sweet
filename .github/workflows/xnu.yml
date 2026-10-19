@@ -15,6 +15,9 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      sweet_board:
+        description: SWEET board variant (empty = sweet phone, t290 = Galaxy Tab A 8.0 SM-T290, 4K pages + GICv2)
+        default: ""
   push:
     branches: [main]
     paths:
@@ -31,6 +34,7 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
+  SWEET_BOARD: ${{ inputs.sweet_board || '' }}
 
 jobs:
   build:
