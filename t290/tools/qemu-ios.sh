@@ -16,7 +16,7 @@ python3 t290/tools/mkadt_t290.py "$W/q.adt" --qemu --smp "$SMP" --fb 1536x2048
 # sweet's phone boot-args (README) with the virtio root instead of UFS.
 ARGS="debug=0xc serial=3 cpus=$SMP sweetpsci=hvc keepsyms=1 -enable_kprintf_spam -noprogress"
 ARGS="$ARGS rd=vblkroot0 vblkrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1"
-ARGS="$ARGS wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=10"
+ARGS="$ARGS wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=10 msgbuf=8388608 sweetsample=SpringBoard,backboardd,com.apple.datamigrator"
 python3 tools/mkpayload.py "$K" "$W/q.adt" "$W/payload.bin" --cmdline "$ARGS"
 rm -rf "$OUT"
 python3 tools/qemu-sweet.py "$W/payload.bin" "$OUT" --secs "$SECS" --shots "$SHOT" --kernel "$K" \
