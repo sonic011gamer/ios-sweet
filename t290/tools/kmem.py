@@ -17,10 +17,16 @@ import bisect, socket, struct, subprocess, sys
 
 class Stub:
     def __init__(self, port):
-        self.s = socket.create_connection(('127.0.0.1', port), timeout=10)
+        self.s = socket.create_connection(('127.0.0.1', port), timeout=3)
         self.buf = b''
         self.s.sendall(b'\x03')		# stop the guest
-        self.packet()			# stop reply
+        try:
+            self.packet()		# stop reply
+        except TimeoutError:
+            # QEMU stops the guest when a client connects: an earlier client
+            # that left without 'c' leaves it stopped, and ^C gets no reply.
+            self.cmd('?')
+        self.s.settimeout(30)
 
     def _read(self):
         data = self.s.recv(65536)
