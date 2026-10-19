@@ -28,7 +28,34 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
-## Ядро T290 (2026-10-19) — написано, ЕЩЁ НЕ СОБИРАЛОСЬ
+## Состояние 2026-10-20 (читать первым)
+
+- Форк: github.com/terx1232/ios-sweet, ветка `t290` (ветка по умолчанию форка — иначе GitHub
+  не регистрировал workflow). Сборка: `gh workflow run xnu.yml -R terx1232/ios-sweet --ref t290 -f sweet_board=t290`.
+- CI 39280792571 (0101+0102 старой версии): упал только на pe_fiq.c и IOKitBSDInit.cpp —
+  `\n` в трёх строках kprintf/IOLog превратился в перевод строки (heredoc через Bash-инструмент
+  схлопывает `\\` → `\`; писать такие правки через Write/Edit). Флаги T290 в CI дошли до 1101
+  файла, патчи 0101/0102 применились. Исправлено в eee22c1, CI 39285650537 запущен.
+- Патчи: 0101 (A53/4K/GICv2), 0102 (virtio-blk root, `rd=vblkroot0 vblkrw=1`),
+  0103 (PSCI через HVC по `sweetpsci=hvc`, для QEMU SMP).
+- **Локальная проверка компиляции работает** (WSL, clang 14 из Ubuntu):
+  дерево `xnu-buildtree` + лог CI автора (run 39158169212) → `~/bt`, на него наложены 0101–0103;
+  `XNU_CC_EXTRA=-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang`,
+  `XNU_CC_POST="-DSWEET_T290=1 -march=armv8-a+crc+crypto -UARM_LARGE_MEMORY -UVM_KERNEL_LINK_ADDRESS -DVM_KERNEL_LINK_ADDRESS=0xfffffff007004000"`,
+  `python3 tools/xnu-cc.py ~/bt/run.log ~/bt --per-file` (новые файлы вроде sweet_vblk.c — только явным путём).
+  Результат: всё ядро проходит, падают лишь хостовые `SETUP/*` (как и у sweet). Ошибки CI совпали с локальными 1:1.
+- iOS: iPad 5 (iPad6,11/J71sAP) iPadOS 16.7.16 20H392, IPSW качается в `D:\test1\ipsw\` (вне git).
+  OS = 087-86634-044.dmg, SystemOS cryptex = 087-86624-047.dmg, AppOS = 087-86715-047.dmg.
+  `research/ipsw-ipad5/j71sap.adt` (DeviceTree, вне git) → /product для mkadt_t290.
+- WSL без сети: служба Windows **HNS отключена** (StartupType Disabled), нужен админ
+  (`Set-Service hns -StartupType Manual; Start-Service hns`). Обход: .deb скачаны через Windows
+  (`D:\test1\dl\debs`: hfsprogs, libfuse3-dev, libbz2-dev), apfs-fuse собран g++ без cmake
+  (`/usr/local/bin/apfs-fuse`, скрипт `D:\test1\dl\build-apfs.sh`).
+- QEMU: `t290/tools/qemu-ios.sh KERNEL ROOT.img OUT` — 4×A53, GICv2, virtio-blk корень,
+  экран 1536×2048 (AppleCLCD сам выбирает родной размер, если буфер больше 1125×2436),
+  снимки каждые 30 с (`--shots`) = замер времени загрузки.
+
+## Ядро T290 (2026-10-19) — первая версия
 
 Порт живёт веткой `t290` форка ios-sweet. Отдельной MACHINE_CONFIG нет: весь код
 sweet (80+ мест `ARM64_BOARD_CONFIG_SWEET`, стейдж-скрипты по `MACHINE_CONFIG == SWEET`)
