@@ -28,7 +28,31 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
-## Состояние 2026-10-20 (читать первым)
+## 🎉 2026-10-20 ~03:40: ядро T290 доходит до userspace в QEMU
+
+CI 39309753629 (0101–0110 + firehose -mcpu в workflow), `qemu-t290.sh` (cortex-a53, GICv2,
+RAM-диск init): `BSD root: md0` → `*** SWEET userspace: init running as PID 1 ***`.
+Цепочка исправлений этого дня (каждое найдено в QEMU):
+- 0104 ранняя консоль телефона (0x9c000000, 16K-таблицы) → выключена для T290;
+- 0105 `casa` в commpage (pfz trylock) → ldaxr/stxr;
+- `-mcpu=cortex-a53` (clang для arm64-apple-macos держит apple-m1 и LSE при любом -march),
+  то же для libfirehose_kernel (workflow, xcconfig `OTHER_CFLAGS[arch=arm64]`);
+- 0106/0108 kmem claims — из самой большой дыры kernel_map + запас 1/32, лог каждого claim;
+- 0107 zone map iOS (24 ГБ VA вместо 128), 0109 пул компрессора iOS (RAM вместо 16×RAM);
+- ADT: CPU compatible должен содержать `qcom,kryo470` (IONameMatch SweetCPU), иначе вечное ожидание CPU;
+- 0110 commpage text VA выровнен на PAGE_RATIO (4K железо + 16K VM-страницы → write_pte_fast panic).
+Загрузка ждёт ~30 с RTC (в QEMU его нет) — не блокер.
+
+Отладка: `t290/tools/kmem.py PORT KERNEL msgbuf|bt|regs|read` через gdb-stub QEMU
+(`qemu-sweet.py --gdbport`); `D:\test1\dl\ci-boot.sh RUN TAG` = дождаться CI → скачать →
+скан LSE во всём ядре (`dl/bt/kscan.sh`) → загрузка с msgbuf/bt (`dl/bt/dbgboot.sh`).
+
+Образ iPadOS: `/root/ios/ipad5-root.img` (+ `.pristine.img`) в WSL, 11 ГБ на HFS+ 16 ГБ, fsck OK.
+Собран `t290/tools/mkroot-ipad5.sh` (stage в ext4 → tar → KVM-гость с Ubuntu-ядром,
+hfsplus.ko + nls_utf8.ko + busybox распаковывает в HFS+). Предупреждение: в образе iPad нет
+system-контейнера mobileactivationd (data ark не записан).
+
+## Состояние 2026-10-20 (утро)
 
 - Форк: github.com/terx1232/ios-sweet, ветка `t290` (ветка по умолчанию форка — иначе GitHub
   не регистрировал workflow). Сборка: `gh workflow run xnu.yml -R terx1232/ios-sweet --ref t290 -f sweet_board=t290`.

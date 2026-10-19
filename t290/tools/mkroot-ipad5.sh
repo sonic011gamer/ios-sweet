@@ -9,7 +9,7 @@
 #   4. a throwaway KVM guest (Ubuntu kernel + hfsplus.ko + busybox) untars
 #      the stage into the HFS+ image
 #   5. fsck.hfsplus, keep a pristine copy
-# Run as root (apfs-fuse, hfsprogs, rsync, python3, qemu-system-x86_64, /dev/kvm).
+# RESUME=1 reuses WORKDIR/stage.tar. Run as root (apfs-fuse, hfsprogs, rsync, python3, qemu-system-x86_64, /dev/kvm).
 #   t290/tools/mkroot-ipad5.sh IPSW WORKDIR VMKIT [SIZE]
 # VMKIT = extracted debs: boot/vmlinuz-*, lib/modules/*/.../{virtio_blk,hfsplus}.ko, bin/busybox
 set -euo pipefail
@@ -22,6 +22,9 @@ WORK=$(pwd)
 t0=$(date +%s)
 step() { echo "== [$(( $(date +%s) - t0 ))s] $*"; }
 
+if [[ ${RESUME:-0} == 1 && -s $WORK/stage.tar ]]; then
+	step "resume: reusing $WORK/stage.tar"
+else
 step "extract disk images"
 for f in $OS $SYSOS $APPOS; do
 	[[ -s $f ]] || python3 - "$IPSW" "$f" <<'PY'
@@ -90,6 +93,7 @@ du -sh "$S"
 step "tar the stage"
 tar -cf "$WORK/stage.tar" --format=gnu --numeric-owner -C "$S" .
 ls -l "$WORK/stage.tar"
+fi
 
 step "empty HFS+ image ($SIZE)"
 rm -f ipad5-root.img
@@ -101,6 +105,7 @@ I=$WORK/initrd; rm -rf "$I"; mkdir -p "$I/bin" "$I/m"
 cp "$KIT/bin/busybox" "$I/bin/busybox"
 cp "$(find "$KIT/lib/modules" -name 'virtio_blk.ko*' | head -1)" "$I/m/virtio_blk.ko"
 cp "$(find "$KIT/lib/modules" -name 'hfsplus.ko*' | head -1)" "$I/m/hfsplus.ko"
+cp "$(find "$KIT/lib/modules" -name 'nls_utf8.ko*' | head -1)" "$I/m/nls_utf8.ko"
 cat > "$I/init" <<'INIT'
 #!/bin/busybox sh
 B=/bin/busybox
@@ -109,6 +114,7 @@ $B mount -t proc proc /proc
 $B mount -t sysfs sys /sys
 $B mount -t devtmpfs dev /dev
 $B insmod /m/virtio_blk.ko
+$B insmod /m/nls_utf8.ko
 $B insmod /m/hfsplus.ko
 $B sleep 1
 if $B mount -t hfsplus -o force /dev/vda /t; then
@@ -129,7 +135,10 @@ qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -nographic -no-reboot \
 	-append "console=ttyS0 panic=-1 quiet" \
 	-drive file="$WORK/ipad5-root.img",if=virtio,format=raw,cache=unsafe \
 	-drive file="$WORK/stage.tar",if=virtio,format=raw,readonly=on | tee "$WORK/vm.log" | grep -a VMSTEP
-grep -q "VMSTEP TAR_OK" "$WORK/vm.log" && grep -q "VMSTEP UMOUNT_OK" "$WORK/vm.log"
+if ! grep -q "VMSTEP TAR_OK" "$WORK/vm.log" || ! grep -q "VMSTEP UMOUNT_OK" "$WORK/vm.log"; then
+	echo "KVM guest did not fill the image (see $WORK/vm.log)" >&2
+	exit 1
+fi
 
 step "fsck"
 # Linux hfsplus decomposes some non-ASCII names differently from Apple's tables.
