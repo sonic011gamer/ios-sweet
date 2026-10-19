@@ -140,10 +140,10 @@ index c013288..1bf5a24 100644
  #else
  #define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL
 diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
-index 6089db9..0bc8d74 100644
+index 6089db9..b98d38f 100644
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
-@@ -222,6 +222,142 @@ pe_init_fiq()
+@@ -222,6 +222,140 @@ pe_init_fiq()
  	__builtin_arm_isb(ISB_SY);
  #endif /* SWEET */
  }
@@ -223,8 +223,7 @@ index 6089db9..0bc8d74 100644
 +		if (!gicc_base) {
 +			panic("%s: cannot map GICC region", __func__);
 +		}
-+		kprintf("SWEET GIC: GICv2 GICD 0x%llx GICC 0x%llx, virtual timer INTID %u
-+",
++		kprintf("SWEET GIC: GICv2 GICD 0x%llx GICC 0x%llx, virtual timer INTID %u\n",
 +		    soc_base_phys + reg[0], soc_base_phys + reg[2], sweet_vtimer_intid);
 +	}
 +
@@ -258,8 +257,7 @@ index 6089db9..0bc8d74 100644
 +	__builtin_arm_dsb(DSB_SY);
 +	__builtin_arm_isb(ISB_SY);
 +
-+	kprintf("SWEET GIC: cpu %u interface mask 0x%x
-+", cpu, mask);
++	kprintf("SWEET GIC: cpu %u interface mask 0x%x\n", cpu, mask);
 +}
 +
 +uint32_t
