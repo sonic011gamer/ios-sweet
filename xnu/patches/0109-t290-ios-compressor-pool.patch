@@ -1,0 +1,14 @@
+diff --git a/osfmk/vm/vm_compressor.c b/osfmk/vm/vm_compressor.c
+index 1e7ca07..aaca6c6 100644
+--- a/osfmk/vm/vm_compressor.c
++++ b/osfmk/vm/vm_compressor.c
+@@ -811,7 +811,8 @@ vm_compressor_set_size(void)
+ 	compressor_pool_max_size = C_SEG_MAX_LIMIT;
+ 	compressor_pool_max_size *= c_seg_bufsize;
+ 
+-#if XNU_TARGET_OS_OSX
++/* SWEET_T290: macOS sizes the pool at 16x RAM (24GB of VA here); use the iOS pool. */
++#if XNU_TARGET_OS_OSX && !defined(SWEET_T290)
+ 
+ 	if (vm_compression_limit == 0) {
+ 		if (max_mem <= (4ULL * 1024ULL * 1024ULL * 1024ULL)) {
