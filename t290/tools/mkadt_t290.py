@@ -86,7 +86,10 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1):
         c = adt.Node()
         c.props = list(template.props)
         set_props(c, name=cstr(f'cpu{core}'),
-                  compatible=cstr('arm,cortex-a53') + cstr('ARM,v8'),
+                  # 'qcom,kryo470' is SweetCPU's IONameMatch (KernelConfigTables.cpp):
+                  # without it no CPU driver starts and boot waits forever for
+                  # gIOAllCPUInitializedKey before bsd_init.
+                  compatible=cstr('arm,cortex-a53') + cstr('qcom,kryo470') + cstr('ARM,v8'),
                   reg=u32(core if qemu else 0x100 | core),
                   cpu_id=u32(core), cluster_core_id=u32(core),
                   l2_cache_id=u32(0), l3_cache_id=u32(0),

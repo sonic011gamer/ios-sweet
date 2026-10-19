@@ -1,0 +1,18 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 00568d3..7f43130 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10891,7 +10891,12 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+ 	vm_map_address_t commpage_text_va = 0;
+ 
+ 	do {
+-		int text_leaf_index = random() % num_ptes;
++		/*
++		 * The commpage text is one VM page: with 4K hardware pages under
++		 * 16K VM pages (PAGE_RATIO 4, SWEET_T290) it must start on a
++		 * PAGE_RATIO-aligned leaf entry, or write_pte_fast() panics.
++		 */
++		int text_leaf_index = (random() % num_ptes) & ~(PAGE_RATIO - 1);
+ 
+ 		// Generate a VA for the commpage text with the same root and twig index as data
+ 		// comm page, but with new leaf index we've just generated.

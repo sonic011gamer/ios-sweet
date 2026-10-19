@@ -154,6 +154,7 @@ def main():
     ap.add_argument('--hmp', action='append', default=[], help='extra monitor command run after stop (repeatable), e.g. "x /8gx 0xfffffe..."')
     ap.add_argument('--cpu', default='cortex-a76')	# ARMv8.2 like Kryo 470, same ID_AA64MMFR0
     ap.add_argument('--gic-version', default='3', help='virt GIC: 3 (sweet) or 2 (SWEET_BOARD=t290)')
+    ap.add_argument('--gdbport', type=int, help='gdb stub on this TCP port while running normally (t290/tools/kmem.py)')
     ap.add_argument('--disk', help='raw root image as a virtio-blk disk (kernel: rd=vblkroot0)')
     ap.add_argument('--smp', type=int, default=1)
     ap.add_argument('--shots', type=float, default=0, help='save the framebuffer every N seconds as shot-SSSS.png (boot timeline)')
@@ -202,6 +203,8 @@ def main():
                 '-device', 'virtio-blk-device,drive=hd0']
     if a.gdb:
         cmd += ['-S', '-gdb', 'tcp::1234']
+    elif a.gdbport:
+        cmd += ['-gdb', f'tcp::{a.gdbport}']
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
     if a.gdb:
         print('gdb stub on :1234; QMP socket:', mon, file=sys.stderr)
