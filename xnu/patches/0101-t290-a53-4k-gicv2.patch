@@ -26,7 +26,7 @@ index 2545cf9..4c3ccd0 100644
  	uint64_t mpidr = topology->cpus[logical].phys_id;
  	unsigned int aff0 = mpidr & 0xff;
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
-index 9a748ea..8d51fcc 100644
+index 9a748ea..6e82507 100644
 --- a/makedefs/MakeInc.def
 +++ b/makedefs/MakeInc.def
 @@ -61,7 +61,13 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
@@ -36,7 +36,7 @@ index 9a748ea..8d51fcc 100644
 +# SWEET_BOARD=t290 (environment): same SWEET config for the SM-T290 tablet,
 +# Cortex-A53 = plain ARMv8.0 (no LSE atomics, no PAN, no 16K pages).
 +ifeq ($(SWEET_BOARD),t290)
-+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DSWEET_T290=1 -march=armv8-a+crc+crypto
++MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DSWEET_T290=1 -march=armv8-a+crc+crypto -mcpu=cortex-a53
 +else
  MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
 +endif
