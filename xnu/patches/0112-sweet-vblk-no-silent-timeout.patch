@@ -1,0 +1,29 @@
+diff --git a/bsd/dev/sweet_vblk.c b/bsd/dev/sweet_vblk.c
+index c96a5a6..e761125 100644
+--- a/bsd/dev/sweet_vblk.c
++++ b/bsd/dev/sweet_vblk.c
+@@ -83,7 +83,12 @@ extern void sweet_sample_start(void);
+ #define QSIZE                   8
+ #define SECTOR                  512u
+ #define BOUNCE_SIZE             (1u << 20)
+-#define CMD_TIMEOUT_NS          (10ull * NSEC_PER_SEC)
++/*
++ * A host flushing a large write-back cache can take far longer than a real
++ * disk; the device always completes eventually, and giving up would leave
++ * the ring out of step with used->idx. Wait long, then fail loudly.
++ */
++#define CMD_TIMEOUT_NS          (600ull * NSEC_PER_SEC)
+ 
+ struct vring_desc {
+ 	uint64_t addr;
+@@ -186,8 +191,8 @@ vblk_cmd(uint32_t type, uint64_t sector, uint32_t len)
+ 	deadline += mach_absolute_time();
+ 	while (*used_idx == vb.used_seen) {
+ 		if (mach_absolute_time() > deadline) {
+-			printf("SWEET VBLK: request type %u sector %llu timed out\n", type, sector);
+-			return EIO;
++			panic("SWEET VBLK: request type %u sector %llu: no completion in %llu s",
++			    type, sector, CMD_TIMEOUT_NS / NSEC_PER_SEC);
+ 		}
+ 	}
+ 	__builtin_arm_dmb(DMB_ISH);

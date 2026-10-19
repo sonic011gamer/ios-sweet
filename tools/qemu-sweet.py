@@ -199,7 +199,7 @@ def main():
            '-device', f'loader,addr={STUB_PA:#x},cpu-num=0']
     if a.disk:
         cmd += ['-global', 'virtio-mmio.force-legacy=false',
-                '-drive', f'if=none,file={a.disk},format=raw,id=hd0,cache=writeback',
+                '-drive', f'if=none,file={a.disk},format=raw,id=hd0,cache=unsafe',
                 '-device', 'virtio-blk-device,drive=hd0']
     if a.gdb:
         cmd += ['-S', '-gdb', 'tcp::1234']
