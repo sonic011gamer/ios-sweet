@@ -4,7 +4,7 @@
 Starts from tools/mkadt.py (chosen, defaults, identity, wdt, disp0, ...) and
 replaces what differs on the Galaxy Tab A 8.0 2019 (SM-T290, SDM429):
 GICv2 instead of GICv3, four Cortex-A53, the RAM window and the splash
-framebuffer. Usage:  mkadt_t290.py OUT.adt [--qemu] [--dump]
+framebuffer. Usage:  mkadt_t290.py OUT.adt [--qemu [--smp N]] [--fb WxH] [--dump]
 
 --qemu: QEMU virt with -M virt,gic-version=2 -cpu cortex-a53 (t290/tools/qemu-t290.sh).
 Hardware addresses: msm8937.dtsi / sdm429-cpu.dtsi of LineageOS
@@ -62,7 +62,7 @@ def child(n, name):
     raise SystemExit(f'mkadt.py tree has no {name!r} node')
 
 
-def build(qemu=False, fb_w=FB_W, fb_h=FB_H):
+def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1):
     root = mkadt.build(qemu=qemu)
     gicd, gicc, timebase, vtimer = ((QEMU_GICD, QEMU_GICC, QEMU_TIMEBASE, QEMU_VTIMER_INTID)
                                     if qemu else (GICD, GICC, TIMEBASE, VTIMER_INTID))
@@ -81,7 +81,8 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H):
     cpus = child(root, 'cpus')
     template = cpus.children[0]
     cpus.children = []
-    for core in range(1 if qemu else NCPUS):
+    # QEMU virt (GICv2): MPIDR Aff0 = vCPU index; boot with cpus=N sweetpsci=hvc.
+    for core in range(qemu_cpus if qemu else NCPUS):
         c = adt.Node()
         c.props = list(template.props)
         set_props(c, name=cstr(f'cpu{core}'),
@@ -133,7 +134,8 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H):
 if __name__ == '__main__':
     fb = sys.argv[sys.argv.index('--fb') + 1] if '--fb' in sys.argv else f'{FB_W}x{FB_H}'
     w, h = (int(x) for x in fb.split('x'))
-    root = build(qemu='--qemu' in sys.argv, fb_w=w, fb_h=h)
+    smp = int(sys.argv[sys.argv.index('--smp') + 1]) if '--smp' in sys.argv else 1
+    root = build(qemu='--qemu' in sys.argv, fb_w=w, fb_h=h, qemu_cpus=smp)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
