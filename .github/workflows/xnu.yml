@@ -55,6 +55,21 @@ jobs:
           # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          # SWEET_BOARD=t290: libfirehose_kernel is linked into the kernel, so its
+          # arm64 slice must also avoid LSE (Cortex-A53): same CPU flag as the kernel.
+          if [ "$SWEET_BOARD" = t290 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path('dxb/build.sh')
+          t = p.read_text()
+          i = t.index('xcodebuild install -target libfirehose_kernel')
+          j = t.rindex('        cd "${SRCROOT}"\n', 0, i)
+          line = ("        echo 'OTHER_CFLAGS[arch=arm64] = -mkernel -nostdinc -Wno-packed -mcpu=cortex-a53' "
+                  '>> "${SRCROOT}/xcodeconfig/libfirehose_kernel.xcconfig"\n')
+          p.write_text(t[:j] + line + t[j:])
+          PY
+            grep -n 'mcpu=cortex-a53' dxb/build.sh
+          fi
           ls dxb/patches
 
       - name: Deps
