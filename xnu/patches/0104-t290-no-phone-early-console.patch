@@ -1,0 +1,99 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 06bb568..f1349cc 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1825,7 +1825,7 @@ init_ptpages(tt_entry_t *tt, vm_map_address_t start, vm_map_address_t end, bool
+ #define ARM64_PHYSMAP_ALIGNMENT_PADDING (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE)
+ #endif
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ /*
+  * The reserved low-globals/kernel region is excluded from VM allocation.
+  * Use the otherwise empty 32MB block above low globals and below gVirtBase
+@@ -2179,7 +2179,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	arm_set_user_tbi();
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
+ 	sweet_early_map_final();
+ #endif
+@@ -2188,7 +2188,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	ml_enable_monitor();
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+ 	sweet_early_relocate(SWEET_EARLY_FB_VA);
+ #endif
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 1363390..8941b20 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -515,7 +515,7 @@ LEXT(start_first_cpu)
+ 	mov		x20, x0
+ 	mov		x21, #0
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+ 	MOV64	x0, (0x9c000000 + 2368 * 4320)
+ 	mov		w1, #-1
+@@ -680,7 +680,7 @@ Lkernelcache_base_found:
+ 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
+ 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ 	/*
+ 	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+ 	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 6928957..172451b 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -7,7 +7,7 @@
+  */
+ #include <arm64/sweet_early.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..f71cb01 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -6,7 +6,7 @@
+ #include <stdarg.h>
+ #include <stdint.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) && !defined(SWEET_T290)
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+@@ -19,6 +19,19 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)label;
+ }
+ static inline void sweet_early_disable(void) {}
++static inline void sweet_early_putc(char c)
++{
++	(void)c;
++}
++static inline void sweet_early_panic(const char *fmt, va_list *args)
++{
++	(void)fmt;
++	(void)args;
++}
++static inline void sweet_early_relocate(uint64_t base)
++{
++	(void)base;
++}
+ #endif
+ 
+ #endif
