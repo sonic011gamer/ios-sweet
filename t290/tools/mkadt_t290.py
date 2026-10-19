@@ -35,6 +35,7 @@ FB_W, FB_H = 800, 1280
 
 QEMU_GICD, QEMU_GICC, QEMU_TIMEBASE = 0x08000000, 0x08010000, 62500000
 QEMU_VTIMER_INTID = 27
+QEMU_VIRTIO_MMIO = 0x0a000000
 
 
 def set_props(n, **kv):
@@ -91,6 +92,12 @@ def build(qemu=False):
 
     # sweet's UFS node points at SM7150 MMIO; the tablet has eMMC (SDHCI).
     root.children = [c for c in root.children if c.name != 'sweet-ufs']
+    if qemu:
+        # bsd/dev/sweet_vblk.c (rd=vblkroot0): QEMU virt's 32 virtio-mmio transports
+        vblk = adt.Node()
+        vblk.props = [('name', 0, cstr('sweet-vblk')), ('compatible', 0, cstr('virtio,mmio')),
+                      ('reg', 0, u64(QEMU_VIRTIO_MMIO, 32 * 0x200))]
+        root.children.append(vblk)
 
     compatible = b''.join(v for k, _, v in root.props if k == 'compatible')
     set_props(root, compatible=compatible.replace(b'qcom,sm7150\0', b'samsung,gtowifi\0qcom,sdm429\0'))

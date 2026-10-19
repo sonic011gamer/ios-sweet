@@ -154,6 +154,9 @@ def main():
     ap.add_argument('--hmp', action='append', default=[], help='extra monitor command run after stop (repeatable), e.g. "x /8gx 0xfffffe..."')
     ap.add_argument('--cpu', default='cortex-a76')	# ARMv8.2 like Kryo 470, same ID_AA64MMFR0
     ap.add_argument('--gic-version', default='3', help='virt GIC: 3 (sweet) or 2 (SWEET_BOARD=t290)')
+    ap.add_argument('--disk', help='raw root image as a virtio-blk disk (kernel: rd=vblkroot0)')
+    ap.add_argument('--smp', type=int, default=1)
+    ap.add_argument('--shots', type=float, default=0, help='save the framebuffer every N seconds as shot-SSSS.png (boot timeline)')
     ap.add_argument('--fb', help='framebuffer ADDR,WIDTH,HEIGHT (32 bpp), default sweet 0x9c000000,1080,2400')
     ap.add_argument('--kernel', help='matching unstripped kernel, for exact framebuffer text decoding (uses llvm-nm)')
     ap.add_argument('--fail-on-panic', action='store_true', help='exit 2 for a visible panic, 3 for incomplete/blank decoding; requires --kernel')
@@ -187,12 +190,16 @@ def main():
     # virt RAM starts at 0x40000000: cover the payload's RAM (mkadt.py --highmem needs 8G).
     mem_size = struct.unpack_from('<Q', payload, 0x40)[0]
     ram_gib = max(4, -(-(phys_base + mem_size - 0x40000000) // (1 << 30)))
-    cmd = ['qemu-system-aarch64', '-M', f'virt,gic-version={a.gic_version}', '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
+    cmd = ['qemu-system-aarch64', '-M', f'virt,gic-version={a.gic_version}', '-cpu', a.cpu, '-smp', str(a.smp), '-m', f'{ram_gib}G',
            '-nographic', '-serial', f'file:{out}/serial.txt', '-qmp', f'unix:{mon},server,nowait',
            '-d', 'int,guest_errors,unimp', '-D', f'{out}/qemu.log', '-no-reboot',
            '-device', f'loader,file={out}/ram.bin,addr={phys_base:#x},force-raw=on',
            '-device', f'loader,file={out}/stub.bin,addr={STUB_PA:#x},force-raw=on',
            '-device', f'loader,addr={STUB_PA:#x},cpu-num=0']
+    if a.disk:
+        cmd += ['-global', 'virtio-mmio.force-legacy=false',
+                '-drive', f'if=none,file={a.disk},format=raw,id=hd0,cache=writeback',
+                '-device', 'virtio-blk-device,drive=hd0']
     if a.gdb:
         cmd += ['-S', '-gdb', 'tcp::1234']
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -201,8 +208,16 @@ def main():
         p.wait()
         return
     t0 = time.time()
+    next_shot = a.shots
     while p.poll() is None and time.time() - t0 < a.secs:
         time.sleep(0.2)
+        if a.shots and time.time() - t0 >= next_shot:
+            raw_path = f'{out}/shot.raw'
+            qmp(mon, pmemsave=(FB_BASE, FB_STRIDE * FB_H, raw_path))
+            if os.path.exists(raw_path):
+                write_png(f'{out}/shot-{int(next_shot):04d}.png', open(raw_path, 'rb').read())
+                os.unlink(raw_path)
+            next_shot += a.shots
     result = {'status': 'qemu_exited', 'qemu_returncode': p.returncode}
     if p.poll() is None:
         _, regs, *extra = qmp(mon, 'stop', 'info registers', *a.hmp, pmemsave=(FB_BASE, FB_STRIDE * FB_H, f'{out}/fb.raw'))
