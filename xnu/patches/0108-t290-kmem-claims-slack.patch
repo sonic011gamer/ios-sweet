@@ -1,0 +1,19 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+index c67790c..4f27f48 100644
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3527,6 +3527,14 @@ kmem_add_extra_claims(void)
+ 
+ 	vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
+ 	largest_free_size = trunc_page(largest_free_size);
++#if defined(SWEET_T290)
++	/*
++	 * The claims are laid out back to back from the start of the largest
++	 * hole; leave slack for entries at its edges (the last claim,
++	 * kmem_data_range, did not fit without it).
++	 */
++	largest_free_size -= 64ULL << 20;
++#endif
+ 
+ 	/*
+ 	 * kasan and configs w/o *TRR need to have just one ptr range due to
