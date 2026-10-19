@@ -1,0 +1,64 @@
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+index 54edb01..c67790c 100644
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -3589,6 +3589,48 @@ kmem_add_extra_claims(void)
+ 	kmem_claims[kmem_claim_count++] = kmem_spec_data;
+ }
+ 
++#if defined(SWEET_T290)
++/*
++ * SWEET_T290 (4K pages, iOS kernel layout): kernel_map has several holes
++ * around the reserved static regions. kmem_add_extra_claims() sizes the
++ * claims to fill the LARGEST hole, but they are laid out from the end of
++ * the fuzz allocation, which first-fit put in the lowest hole: when that is
++ * not the largest one the last claims do not fit ("vm_map_locate_space
++ * failing for claim kmem_ptr_range_meta"). Start in the largest hole.
++ */
++__startup_func
++static vm_map_offset_t
++sweet_kernel_map_largest_hole(void)
++{
++	vm_map_offset_t prev_end = kernel_map->min_offset, best = 0, best_size = 0;
++
++	vm_map_lock_read(kernel_map);
++	for (vm_map_entry_t e = vm_map_first_entry(kernel_map);
++	    e != vm_map_to_entry(kernel_map); e = e->vme_next) {
++		if (e->vme_start > prev_end) {
++			printf("SWEET kmem: hole 0x%llx - 0x%llx (%llu MB)\n",
++			    (uint64_t)prev_end, (uint64_t)e->vme_start,
++			    (uint64_t)(e->vme_start - prev_end) >> 20);
++			if (e->vme_start - prev_end > best_size) {
++				best_size = e->vme_start - prev_end;
++				best = prev_end;
++			}
++		}
++		prev_end = e->vme_end;
++	}
++	if (kernel_map->max_offset > prev_end) {
++		printf("SWEET kmem: hole 0x%llx - 0x%llx (%llu MB)\n",
++		    (uint64_t)prev_end, (uint64_t)kernel_map->max_offset,
++		    (uint64_t)(kernel_map->max_offset - prev_end) >> 20);
++		if (kernel_map->max_offset - prev_end > best_size) {
++			best = prev_end;
++		}
++	}
++	vm_map_unlock_read(kernel_map);
++	return best;
++}
++#endif /* SWEET_T290 */
++
+ __startup_func
+ static void
+ kmem_scramble_ranges(void)
+@@ -3625,6 +3667,10 @@ kmem_scramble_ranges(void)
+ 	 * Add claims for ptr and data kmem_ranges
+ 	 */
+ 	kmem_add_extra_claims();
++#if defined(SWEET_T290)
++	start = sweet_kernel_map_largest_hole();
++	printf("SWEET kmem: claims from 0x%llx\n", (uint64_t)start);
++#endif
+ 
+ 	/*
+ 	 * Shuffle registered claims
