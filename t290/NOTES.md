@@ -28,6 +28,37 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
+## 2026-10-20 ~17:00: планшет разблокирован, TWRP, живой FDT
+
+- Загрузчик разблокирован пользователем (`ro.boot.flash.locked=0`, `verifiedbootstate=orange`),
+  прошивка та же T290XXS5CWG5 / Android 11. Knox сгорел (необратимо).
+- TWRP 3.7.0_11-HeribertYavuz (XDA «OFRP & TWRP For TAB A 2019 (T290) (Binary 5)») прошит Odin 3.14
+  в AP одним tar: `recovery.img` автора + свой пустой `vbmeta.img` (AVB0, flags=2, 4096 Б) —
+  `D:\test1\dl\twrp\twrp-AP.tar`. Стоковый vbmeta перезаписан → для отката нужна стоковая CWG5.
+  Вход в TWRP: Odin без Auto Reboot → Vol−+Power до чёрного → сразу Vol+ +Power.
+  Android грузится как раньше (boot/system/userdata не трогали). В TWRP adb = root.
+- Дампы (вне git): `D:\test1\ios-t290\logs\twrp-20261020\` (fdt.dtb/fdt.dts, iomem, dmesg, partitions,
+  getprop, interrupts); бэкап всех разделов ≤200 МБ (64 шт., 712 МБ, sha256): `D:\test1\ios-t290\backup-20261020\`
+  (RPMB не читается — норма). Большие (system/vendor/product/oem/cache/userdata) не копировались.
+
+Живой FDT (board_id P81080BA5, `qcom,sdm429`, msm-id 0x162; панель `jd9367_wxga_video_txd`):
+| Что | Значение |
+| --- | --- |
+| RAM | `0x80000000`+1 ГБ и `0xc0000000`+1 ГБ = сплошные 2 ГБ `0x80000000..0x100000000` |
+| Свободно для XNU | крупнейший кусок System RAM: **`0x92600000..0xffffffff` (~1754 МБ)**; ниже — дыры reserved |
+| reserved no-map | 0x85000000+0x800000, 0x85b00000+0xd00000, 0x86800000+0x5500000, 0x8bd00000+0x1100000, 0x8ce00000+0x700000; splash 0x90000000+0x1400000; ramoops 0x92100000+0x100000; 0x92200000+0x400000 |
+| Splash fb | 0x90000000, 800×1280, 32 bpp, stride 3200 (`mdssfb_80000`) |
+| GIC | v2 `qcom,msm-qgic2`, GICD 0x0b000000, GICC 0x0b002000 (подтверждено) |
+| Таймер | 19.2 МГц, PPI <1 2>,<1 3>,<1 4>,<1 1> → **vtimer INTID 20** (подтверждено) |
+| CPU | 4× cortex-a53, MPIDR 0x100..0x103, `enable-method = psci`, **PSCI 1.0 method = smc** (в QEMU — hvc) |
+| eMMC | sdhc1 `qcom,sdhci-msm` hc 0x7824900, core 0x7824000, cmdq 0x7824e00; IRQ SPI 123 (hc), 138 (pwr); 8 бит; 32 ГБ (QX63AB) |
+| **microSD** | **sdhc2** hc 0x7864900, core 0x7864000; IRQ SPI 125 (hc, INTID 157), 221 (pwr); 4 бит; **card-detect tlmm GPIO 67**; питание vdd/vdd-io — регуляторы PMIC (могут быть выключены LK — проверить) |
+| UART | msm-uartdm 0x78b0000 (earlycon), IRQ SPI 108 |
+
+План пользователя: iPadOS-корень на **microSD** (sdhc2), ядро — в раздел `recovery` (вход Vol+ +Power),
+Android в `boot` не трогать. Нужно: драйвер SDHCI (проверить в QEMU), карта памяти в mkadt_t290
+(база 0x92600000?), PSCI smc, формат Samsung boot.img v1 (ядро + дописанный DTB) для LK.
+
 ## 🎉🎉 2026-10-20 ~16:40: ЭКРАН БЛОКИРОВКИ iPadOS 16 в QEMU (прогон ios3)
 
 Тот же прогон ios3 (CI 39321740004, SMP=1, TCG): логотип Apple ~240–1620 с, затем ~1620–1860 с
