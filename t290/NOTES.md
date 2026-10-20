@@ -28,6 +28,17 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
+## 🎉🎉 2026-10-20 ~16:40: ЭКРАН БЛОКИРОВКИ iPadOS 16 в QEMU (прогон ios3)
+
+Тот же прогон ios3 (CI 39321740004, SMP=1, TCG): логотип Apple ~240–1620 с, затем ~1620–1860 с
+на экране консоль ядра (`SK[0]: __nexus_register identityservices(53)...`), первый `SWEET FB: swap`
+~1840 с, к **1920 с — lock screen SpringBoard**: «Wednesday, December 31», часы, «Press home to open»,
+батарея 100% (снимки `D:\test1\qemu-out\ios3\shot-1920.png` … `shot-2160.png`).
+Вывод: ядро T290 (A53, 4K, GICv2, virtio-blk) + неизменённый userland iPad 5 доходят до GUI;
+«зависание» на логотипе было просто медленной первой загрузкой (datamigrator) на 1 vCPU.
+Следующее: SMP=4 (быстрее?), ввод в QEMU (Home/тач) → домашний экран; потом путь на планшет
+(LK/Odin, eMMC SDHCI, экран 800×1280, тач FocalTech).
+
 ## 2026-10-20 ~16:00: iPadOS userland в QEMU, логотип Apple (прогон ios3)
 
 CI 39321740004 (189dc00), `qemu-ios.sh` SMP=1 на свежей копии корня iPad 5:
