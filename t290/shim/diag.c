@@ -129,6 +129,7 @@ static uint32_t plog_init(void)
 static uintptr_t fb = SPLASH_PHYS;
 static uint32_t fb_stride = FB_W * 4, fb_bpp = 4;
 static uint32_t bg;
+static int con_quiet;	/* 1: log to pstore only, keep the screen for new results */
 static int row;
 
 /*
@@ -235,6 +236,8 @@ static void con_str(const char *label, const char *s)
 	plog_str(" ");
 	plog_str(s);
 	plog_str("\n");
+	if (con_quiet)
+		return;
 	put_str(0, label, YELLOW);
 	put_str(LABEL_COLS, s, WHITE);
 	row++;
@@ -254,6 +257,8 @@ static void con_hex3(const char *label, const char *a, uint32_t va, const char *
 		plog_hex(v[i], 8);
 	}
 	plog_str("\n");
+	if (con_quiet)
+		return;
 	int col = put_str(0, label, YELLOW);
 	col = col < LABEL_COLS ? LABEL_COLS : col + 1;
 	for (int i = 0; i < 3 && n[i]; i++) {
@@ -766,6 +771,78 @@ static int sd_power_on(void)
 	return a12 && a11;
 }
 
+#define HC_BLK		0x04	/* block size | block count << 16 */
+#define HC_DATA		0x20
+#define RSP_48B		0x1b	/* 48-bit busy, CRC, index */
+#define CMD_DATA	0x20	/* data present */
+#define XFER_READ	0x10
+
+static uint32_t sd_sec[128];
+
+/* Wait for normal-interrupt bits; returns the status, 0x8000 set on error. */
+static uint32_t sd_wait_int(uint32_t bits, unsigned ms)
+{
+	uint64_t end = now() + timer_hz() / 1000 * ms;
+	do {
+		uint32_t st = hc(HC_INT);
+		if (st & (bits | 0x8000)) {
+			hc_wr(HC_INT, st & (bits | 0xffff0000U | 0x8000));
+			return st;
+		}
+	} while (now() < end);
+	return 0;
+}
+
+/* CMD17, PIO through the buffer data port. 0 = ok. */
+static uint32_t sd_read_block(uint32_t lba)
+{
+	for (int i = 0; hc(HC_PSTATE) & 3; i++) {	/* CMD and DAT inhibit */
+		if (i > 100)
+			return 0x40000;
+		delay_ms(1);
+	}
+	hc_wr(HC_INT, 0xffffffff);
+	hc_wr(HC_BLK, 512 | 1 << 16);
+	hc_wr(HC_ARG, lba);					/* SDHC: block address */
+	hc_wr(HC_XFER_CMD, XFER_READ | (17 << 8 | CMD_DATA | RSP_48) << 16);
+	uint32_t st = sd_wait_int(1, 100);
+	if (!(st & 1) || (st & 0x8000))
+		goto fail;
+	st = sd_wait_int(0x20, 500);			/* buffer read ready */
+	if (!(st & 0x20) || (st & 0x8000))
+		goto fail;
+	for (int i = 0; i < 128; i++)
+		sd_sec[i] = hc(HC_DATA);
+	st = sd_wait_int(2, 500);			/* transfer complete */
+	if (!(st & 2) || (st & 0x8000))
+		goto fail;
+	return 0;
+fail:
+	sd_reset(2 | 4);				/* CMD and DAT lines */
+	return (st >> 16) | 0x10000 | (st ? 0 : 0x20000);
+}
+
+static void sd_show_sector(const char *label, uint32_t lba)
+{
+	uint32_t e = sd_read_block(lba), sum = 0;
+	for (int i = 0; i < 128; i++)
+		sum += sd_sec[i];
+	con_hex3(label, "e=", e, "sum=", sum, "w0=", sd_sec[0]);
+	con_hex3(label, "w110=", sd_sec[110], "w127=", sd_sec[127], 0, 0);
+}
+
+/* SDCC2 apps RCG: source (0 XO, 1 GPLL0), pre-divider, M/N (dual edge). */
+static void sd_set_rcg(uint32_t src, uint32_t prediv, uint32_t m, uint32_t n)
+{
+	wr32(GCC_BASE + GCC_SDCC2_M, m);
+	wr32(GCC_BASE + GCC_SDCC2_N, ~(n - m) & 0xff);
+	wr32(GCC_BASE + GCC_SDCC2_D, ~n & 0xff);
+	wr32(GCC_BASE + GCC_SDCC2_CFG, (2 * prediv - 1) | src << 8 | 2 << 12);
+	wr32(GCC_BASE + GCC_SDCC2_CMD, rd32(GCC_BASE + GCC_SDCC2_CMD) | 1);
+	for (int i = 0; i < 100 && (rd32(GCC_BASE + GCC_SDCC2_CMD) & 1); i++)
+		delay_ms(1);
+}
+
 static void sd_probe(void)
 {
 	char name[6];
@@ -774,6 +851,7 @@ static void sd_probe(void)
 	/* clk 16 mA no pull, cmd/data pull-up 10 mA (Linux sdc2 "active") */
 	wr32(TLMM_BASE + TLMM_SDC2_CTL, 3 << 11 | 3 << 9 | 7 << 6 | 4 << 3 | 4);
 	int pwr = sd_power_on();
+	con_quiet = 0;
 	con_hex3("SDPWR", "ok=", pwr, "pads=", rd32(TLMM_BASE + TLMM_SDC2_CTL), 0, 0);
 
 	STEP("sdcc2 rcg 400k");
@@ -857,10 +935,43 @@ static void sd_probe(void)
 	uint32_t csize = (sd_resp[1] >> 8) & 0x3fffff;
 	con_hex3("CSD", "e=", e3 << 16 | e9, "rca=", rca, "csize=", csize);
 	con_hex3("SIZE", "MiB=", (csize + 1) / 2, "csd3=", sd_resp[3], 0, 0);
+
+	STEP("cmd7 select");
+	uint32_t e7 = sd_cmd(7, rca << 16, RSP_48B);
+	sd_wait_int(2, 100);	/* R1b: busy end = transfer complete */
+	if (e7) {
+		con_hex3("CMD7", "e=", e7, 0, 0, 0, 0);
+		return;
+	}
+	STEP("read lba0 400k 1bit");
+	sd_show_sector("LBA0", 0);
+
+	STEP("acmd6 4bit");
+	uint32_t e6 = sd_cmd(55, rca << 16, RSP_48);
+	if (!e6)
+		e6 = sd_cmd(6, 2, RSP_48);
+	if (!e6)
+		hc_wr(HC_CTL, hc(HC_CTL) | 0x02);	/* host 4-bit */
+	STEP("25 MHz");
+	hc_wr(HC_CLK, hc(HC_CLK) & ~0x0004U);		/* SD clock off while switching */
+	sd_set_rcg(1, 16, 1, 2);			/* GPLL0 800 / 16 = 50, M/N 1/2 -> 25 MHz */
+	hc_wr(HC_CLK, hc(HC_CLK) | 0x0004);
+	con_hex3("FAST", "e6=", e6, "ctl=", hc(HC_CTL), "rcg=", rd32(GCC_BASE + GCC_SDCC2_CMD));
+	STEP("read lba32768 25M 4bit");
+	sd_show_sector("LBA32K", 32768);
+
+	STEP("speed 1 MiB");
+	uint64_t t0 = now();
+	uint32_t bad = 0;
+	for (uint32_t i = 0; i < 2048 && !bad; i++)
+		bad = sd_read_block(65536 + i);
+	uint64_t us = (now() - t0) * 1000000 / timer_hz();
+	con_hex3("SPEED", "err=", bad, "us=", (uint32_t)us, "KBps=", us ? (uint32_t)(1048576ULL * 1000 / us) : 0);
 }
 
 static void show_sd(void)
 {
+	con_quiet = 1;
 	STEP("gcc");
 	con_hex3("SDCC1", "cmd=", rd32(GCC_BASE + GCC_SDCC1_CMD), "apps=", rd32(GCC_BASE + GCC_SDCC1_APPS),
 		 "ahb=", rd32(GCC_BASE + GCC_SDCC1_AHB));
@@ -903,7 +1014,7 @@ void shim_main(uint64_t dtb)
 	STEP("clear screen");
 	con_clear(0x203040);
 	draw_ruler();
-	con_str("T290", "milestone 3b: microSD power via RPM");
+	con_str("T290", "milestone 4: microSD sector reads");
 	con_hex3("RUN", "n=", runs, "dtb=", (uint32_t)dtb, 0, 0);
 	STEP("regs");
 	con_hex3("WDT", "en_was=", wdt_was, "en_now=", rd32(WDT_BASE + WDT_EN), 0, 0);
