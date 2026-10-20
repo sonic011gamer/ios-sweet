@@ -63,6 +63,33 @@ Upstream Linux has NO entry for chip 0x05000400 (A504); A506 = a530_pm4/pfp
   (0x90000000 + offset): a square drawn by the GPU's command processor.
   Needs answers to the SMMU and secure-mode questions first.
 
+## Through Android's kgsl (2026-10-20 evening, safe: kgsl owns power/SMMU/zap)
+Firmware on the tablet (copied to `D:\test1\ios-t290\fw`, not in git):
+a530_pm4.fw, a530_pfp.fw and **a506_zap.mdt/.b00-.b02** (so bare-metal
+bring-up will need the zap shader through TZ, as kgsl does). kgsl: Adreno504v1,
+gpuclk 320 MHz, /dev/kgsl-3d0 world-rw. uapi header: research/kgsl/msm_kgsl.h
+(LineageOS msm8953 lineage-20; build user code with -D__user=).
+- `t290/gpu/kgsl_hello.c`: hand-built type-7 CP_MEM_WRITE via
+  IOCTL_KGSL_GPU_COMMAND -> **"target = 0xc0ffee01 -> THE GPU WROTE IT"**.
+  chip_id 0x05000400, gmem 0x22000, GPU VAs 0x5_0000_0000.
+- `t290/gpu/kgsl_blit.c copy`: 2D engine (fd5_blitter sequence: sysmem prep
+  CP_SET_RENDER_MODE BYPASS + RB_CCU_CNTL 0x10000000 + PC_CCU_INVALIDATE_COLOR,
+  emit_setup, BLIT2D, RB_2D_SRC/DST, CP_BLIT COPY, END2D, CCU/CACHE flush TS):
+  **768x1024 RGBA copied in 2.7 ms incl. submit, 0 wrong pixels**; the CPU
+  halving of the same buffer (WC memory) takes 91 ms.
+  Without the BYPASS prologue the blit wrote nothing.
+- BLIT_OP_SCALE: no output. Mesa's a5xx blitter refuses scaling too ("until we
+  figure out a few more registers"). Format trick (R32G32 src -> R32 dst, double
+  pitch) does not drop channels: both pixels land, in a blocked order
+  (dst row0 = src 16,17 @y0, 16,17 @y2, ...). Dead end for now.
+- The panel's byte order R,B,G is not reachable with the 2D engine's four
+  colour swaps (they form the dihedral group of the 4-cycle); the final
+  shuffle + 229 px shift needs a shader (or the CPU).
+**Next:** compute shaders. Mesa's `computerator` runs ir3 compute shaders on
+a5xx (src/freedreno/computerator/a5xx.cc) through DRM/msm; port its state
+emission to kgsl and assemble shaders with Mesa's ir3 assembler. One compute
+pass could do halve + R,B,G + shift straight into the splash buffer.
+
 ## Open questions
 1. SMMU: bypass or context bank programming from EL1 (Linux kgsl does it, so
    the CB registers are reachable from the apps EE).
