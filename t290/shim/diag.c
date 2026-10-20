@@ -1160,6 +1160,109 @@ static uint32_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t n
 	return 0;
 }
 
+/*
+ * Bit-banged I2C on GPIO10 (SDA) / GPIO11 (SCL), open drain by switching
+ * the output enable (line low = OE with OUT 0, released = input). ~100 kHz.
+ * Tells a QUP set-up problem from an electrical one.
+ */
+#define BB_SDA	10
+#define BB_SCL	11
+
+static void bb_line(unsigned gpio, int high)
+{
+	if (high) {
+		tlmm_cfg(gpio, 0, 0, 2, 0);		/* release: input, external pull-up */
+	} else {
+		tlmm_set(gpio, 0);
+		tlmm_cfg(gpio, 0, 0, 2, 1);		/* drive low */
+	}
+}
+
+static void bb_wait(void)
+{
+	uint64_t end = now() + timer_hz() / 200000;	/* 5 us */
+	while (now() < end)
+		;
+}
+
+static void bb_start(void)
+{
+	bb_line(BB_SDA, 1); bb_line(BB_SCL, 1); bb_wait();
+	bb_line(BB_SDA, 0); bb_wait();
+	bb_line(BB_SCL, 0); bb_wait();
+}
+
+static void bb_stop(void)
+{
+	bb_line(BB_SDA, 0); bb_wait();
+	bb_line(BB_SCL, 1); bb_wait();
+	bb_line(BB_SDA, 1); bb_wait();
+}
+
+/* returns ACK (1) */
+static int bb_write(uint8_t v)
+{
+	for (int i = 7; i >= 0; i--) {
+		bb_line(BB_SDA, (v >> i) & 1); bb_wait();
+		bb_line(BB_SCL, 1); bb_wait();
+		bb_line(BB_SCL, 0);
+	}
+	bb_line(BB_SDA, 1); bb_wait();
+	bb_line(BB_SCL, 1); bb_wait();
+	int ack = !tlmm_get(BB_SDA);
+	bb_line(BB_SCL, 0); bb_wait();
+	return ack;
+}
+
+static uint8_t bb_read(int ack)
+{
+	uint8_t v = 0;
+	bb_line(BB_SDA, 1);
+	for (int i = 7; i >= 0; i--) {
+		bb_wait();
+		bb_line(BB_SCL, 1); bb_wait();
+		v |= (uint8_t)(tlmm_get(BB_SDA) << i);
+		bb_line(BB_SCL, 0);
+	}
+	bb_line(BB_SDA, ack ? 0 : 1); bb_wait();
+	bb_line(BB_SCL, 1); bb_wait();
+	bb_line(BB_SCL, 0);
+	bb_line(BB_SDA, 1);
+	return v;
+}
+
+/* 0x100 | value, or acks of address/register/read-address in the low bits */
+static uint32_t bb_read_reg(uint8_t addr, uint8_t reg)
+{
+	bb_start();
+	int a1 = bb_write((uint8_t)(addr << 1));
+	int a2 = a1 && bb_write(reg);
+	bb_start();
+	int a3 = a2 && bb_write((uint8_t)(addr << 1 | 1));
+	uint8_t v = a3 ? bb_read(0) : 0;
+	bb_stop();
+	return a3 ? 0x100U | v : (uint32_t)(a1 | a2 << 1 | a3 << 2);
+}
+
+/* n bytes from reg over the bit-banged bus; 0 or 1 (no ACK) */
+static uint32_t bb_read_buf(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t n)
+{
+	bb_start();
+	if (!bb_write((uint8_t)(addr << 1)) || !bb_write(reg)) {
+		bb_stop();
+		return 1;
+	}
+	bb_start();
+	if (!bb_write((uint8_t)(addr << 1 | 1))) {
+		bb_stop();
+		return 1;
+	}
+	for (uint32_t i = 0; i < n; i++)
+		buf[i] = bb_read(i + 1 < n);
+	bb_stop();
+	return 0;
+}
+
 /* a 5x5 dot at screen (x, y) */
 static void dot(int x, int y, uint32_t c)
 {
@@ -1185,13 +1288,25 @@ static void __attribute__((unused)) touch_probe(void)
 	STEP("touch pins");
 	con_hex3("PINS", "g10=", rd32(TLMM_BASE + 10 * 0x1000), "g11=", rd32(TLMM_BASE + 11 * 0x1000),
 		 "g64=", rd32(TLMM_BASE + 64 * 0x1000));
-	tlmm_cfg(10, 2, 0, 2, 0);		/* SDA: blsp_i2c3, no pull */
-	tlmm_cfg(11, 2, 0, 2, 0);		/* SCL */
 	tlmm_cfg(65, 0, 3, 2, 0);		/* IRQ: input, pull-up */
 	tlmm_cfg(64, 0, 3, 8, 1);		/* RESET: output */
 	tlmm_set(64, 0);
 	delay_ms(10);
 	tlmm_set(64, 1);
+	delay_ms(250);				/* FT5452 boot after reset */
+
+	/* Electrical check: lines released (GPIO input, no pull) must read 1. */
+	STEP("touch line levels");
+	tlmm_cfg(10, 0, 0, 2, 0);
+	tlmm_cfg(11, 0, 0, 2, 0);
+	delay_ms(1);
+	uint32_t sda = tlmm_get(10), scl = tlmm_get(11);
+	STEP("touch bitbang id");
+	uint32_t bb = bb_read_reg(FTS_ADDR, 0xa3);
+	con_hex3("BITBANG", "sda=", sda, "scl=", scl, "id=", bb);
+
+	tlmm_cfg(10, 2, 0, 2, 0);		/* SDA: blsp_i2c3, no pull */
+	tlmm_cfg(11, 2, 0, 2, 0);		/* SCL */
 
 	STEP("touch qup clocks");
 	wr32(GCC_BASE + GCC_APCS_BRANCH_VOTE, rd32(GCC_BASE + GCC_APCS_BRANCH_VOTE) | 1U << 10);
@@ -1207,9 +1322,16 @@ static void __attribute__((unused)) touch_probe(void)
 	uint8_t id[2] = { 0, 0 };
 	uint32_t e = i2c_read_reg(FTS_ADDR, 0xa3, id, 1);
 	con_hex3("FTS", "err=", e, "chip=", id[0], "irq=", tlmm_get(65));
+	int use_bb = 0;
 	if (e) {
-		con_str("TOUCH", "no answer from the touch controller");
-		return;
+		if (!(bb & 0x100)) {
+			con_str("TOUCH", "no answer from the touch controller");
+			return;
+		}
+		use_bb = 1;				/* QUP fails, the chip answers: bit-bang */
+		tlmm_cfg(10, 0, 0, 2, 0);
+		tlmm_cfg(11, 0, 0, 2, 0);
+		con_str("TOUCH", "QUP failed, using bit-banged I2C");
 	}
 
 	STEP("touch loop");
@@ -1222,7 +1344,7 @@ static void __attribute__((unused)) touch_probe(void)
 			continue;
 		}
 		uint8_t b[63];
-		if (i2c_read_reg(FTS_ADDR, 0, b, sizeof(b))) {
+		if (use_bb ? bb_read_buf(FTS_ADDR, 0, b, sizeof(b)) : i2c_read_reg(FTS_ADDR, 0, b, sizeof(b))) {
 			errs++;
 			delay_ms(5);
 			continue;
