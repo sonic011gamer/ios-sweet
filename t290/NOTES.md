@@ -41,6 +41,17 @@
   getprop, interrupts); бэкап всех разделов ≤200 МБ (64 шт., 712 МБ, sha256): `D:\test1\ios-t290\backup-20261020\`
   (RPMB не читается — норма). Большие (system/vendor/product/oem/cache/userdata) не копировались.
 
+- **Root + постоянный TWRP (17:20).** Android при каждой загрузке восстанавливал стоковый recovery
+  (`/system/bin/install-recovery.sh` + `/system/recovery-from-boot.p`, applypatch только если boot = сток,
+  sha1 10b1f840…). Решение: Magisk v30.7 (GitHub, sha256 e0d32d21…) патчит стоковый boot на ПК
+  (`magiskboot` x86_64 из APK, `boot_patch.sh`, `LEGACYSAR=true KEEPFORCEENCRYPT=true KEEPVERITY=false`;
+  в стоковом boot нет ramdisk, root=PARTUUID — legacy SAR) → `fix_bootable_image.py`
+  (GalaxyA20s/A20s-Fix-Bootable-Image: `SignerVer02` + AVBf-размер, иначе SECURE CHECK FAIL) →
+  Odin AP `D:\test1\dl\root\magisk-twrp-AP.tar` (boot+TWRP+пустой vbmeta). Откат boot: `stock-boot-AP.tar`.
+  Проверено: Android грузится, `magiskd` работает, `adb shell /debug_ramdisk/su -c id` = root;
+  после загрузки Android sha256 разделов recovery/boot = прошитым образам → TWRP больше не слетает.
+  **Значит, наше ядро iPadOS в `recovery` Android тоже не затрёт.**
+
 Живой FDT (board_id P81080BA5, `qcom,sdm429`, msm-id 0x162; панель `jd9367_wxga_video_txd`):
 | Что | Значение |
 | --- | --- |
