@@ -28,6 +28,41 @@ IOKit. 4. GPU blits for AppleCLCD composition (layers, scaling, format).
   programming a context bank (bypass), and may EL1 write the CB registers?
 - Bus: msm-bus "grp3d" votes (bimc), up to 0x71ac00 KBps.
 
+## GCC (Linux drivers/clk/qcom/gcc-msm8917.c, same block on msm8937/SDM429)
+GCC base 0x1800000; offsets:
+- `gfx3d_clk_src` RCG CMD 0x59000 / CFG 0x59004, parents XO 0, GPLL0 1, GPLL3 2,
+  GPLL6 3 (GPLL0 800 MHz: /4 = 200 MHz, /2 = 400 MHz; HID div field = 2*div-1).
+- branches: `gcc_oxili_gfx3d_clk` 0x59020, `gcc_oxili_ahb_clk` 0x59028,
+  `gcc_bimc_gfx_clk` 0x59034 (CBCR bit0 enable, bit31 CLK_OFF).
+- `oxili_gx_gdsc` GDSCR 0x5901c (bit0 SW_COLLAPSE, bit31 PWR_ON),
+  clamp_io_ctrl 0x5b00c (unclamp after power-on), CXCs 0x59000/0x59020.
+
+## a5xx bring-up (Linux drivers/gpu/drm/msm/adreno/a5xx_gpu.c, a5xx_hw_init)
+Register numbers are dword indices (byte offset = 4 * n) into 0x1c00000.
+Upstream Linux has NO entry for chip 0x05000400 (A504); A506 = a530_pm4/pfp
++ a506_zap.mdt. kgsl (Qualcomm) supports A504.
+1. VBIF_ROUND_ROBIN_QOS_ARB (0x3049) = 3, RBBM_AHB_CNTL0 (0x93) = 1, UCHE/CP
+   thresholds, CP_PROTECT_*, *_ADDR_MODE_CNTL = 1 (64-bit addressing).
+2. CP_ME_INSTR_BASE (0x838) / CP_PFP_INSTR_BASE (0x835) = GPU addresses of
+   the PM4 / PFP microcode (loaded from memory by the CP itself).
+3. CP_RB_BASE (0x800), CP_RB_CNTL (0x802), CP_RB_RPTR_ADDR (0x804),
+   CP_RB_WPTR (0x807); CP_PFP_ME_CNTL (0x832) = 0 starts the CP.
+4. ring: CP_ME_INIT (opcode 72) with 8 dwords.
+5. Secure mode: the GPU starts secure. With a zap shader: CP_SET_SECURE_MODE 0
+   from the ring. Without: write RBBM_SECVID_TRUST_CNTL (0xf400) = 0 directly;
+   a wrong guess = access violation.
+6. Status: RBBM_STATUS 0x4f5, RBBM_INT_0_STATUS 0x4e1, CP_HW_FAULT 0xb1a,
+   CP_RB_RPTR 0x806.
+
+## Shim milestones (each with the pstore step log)
+- **gpu1 (probe):** GDSC on + unclamp, gfx3d 200 MHz, branches on; log, then
+  read RBBM_STATUS / INT_0_STATUS / SECVID_TRUST_CNTL / CP_HW_FAULT.
+  Success = values instead of a reset.
+- **gpu2 (hello):** microcode from /vendor/firmware into a buffer, ring with
+  CP_ME_INIT then CP_MEM_WRITE (opcode 61) of a colour into the splash
+  (0x90000000 + offset): a square drawn by the GPU's command processor.
+  Needs answers to the SMMU and secure-mode questions first.
+
 ## Open questions
 1. SMMU: bypass or context bank programming from EL1 (Linux kgsl does it, so
    the CB registers are reachable from the apps EE).
