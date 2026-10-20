@@ -46,7 +46,11 @@
   (256К) весь забит этим спамом — ранние строки ядра потеряны. → **0116**: теневой буфер 1536×2048 BGRA
   (iPad 5) → на каждом flush ½ (nearest), по центру 800×1280, байты R,B,G, сдвиг из ADT sweet-fbcon;
   первые 256К консоли в зону dump ramoops (0x92100000) без перезаписи.
-- Загрузка 3 (CI 39422813087): ждёт пробы.
+- 🎉🎉 **Загрузка 3 (CI 39422813087, 0116): ЭКРАН БЛОКИРОВКИ iPadOS 16 на планшете** (~20:47 → ~21:05,
+  1 CPU). Логотип Apple от backboardd через теневой буфер, затем консольный этап (`SK[0]: __nexus_register …
+  identityservices`), как в QEMU, затем lock screen. Журнал: `logs/xnu-boot3-head.txt` (dmesg-ramoops-0) и
+  `xnu-boot3-tail.txt`. Карта: `SWEET SDHC: … 50 MHz, 1 MiB read in 44120 us` (~23 МБ/с, High Speed прошёл).
+- Дальше: `CPUS=4 mkboot-t290.sh` (образ `dl/k-t290dev3/t290-ios-recovery-4cpu.img`), GPU — `t290/GPU.md`.
 
 ## 2026-10-20 ~18:40: microSD отвечает на голом железе (diag milestone 3b)
 
