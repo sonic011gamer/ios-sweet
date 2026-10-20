@@ -28,6 +28,37 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
+## 2026-10-20 ~18:05: первый наш код на планшете (t290/shim/diag.c) — работает
+
+`t290/shim/build.sh STOCK_BOOT MAGISKBOOT FIX_BOOTABLE_IMAGE.py` → `out/t290-diag.img`:
+shim (start.S/shim.ld из ../../shim + diag.c) упакован в стоковый заголовок (magiskboot repack:
+gzip Image + стоковые appended DTB) + SignerVer02/AVBf. Пишется в `recovery` из Android:
+`adb push` → `su -c dd of=/dev/block/by-name/recovery` (+ sha256). Запуск: выключить → Vol+ +Power.
+Выход: Vol− + Power ~7 с → **сразу Android** (круга нет, Odin не нужен), если shim не сбросил планшет сам.
+TWRP обратно: тот же dd с `D:\test1\dl\twrp\recovery.img`.
+
+Грабли (каждая стоила круга загрузки + Odin):
+- **Чтение регистров MDP (0x1a01000 + пайпы) сбрасывает планшет** (XPU/защита?). Не трогать дисплейный блок.
+- `adb reboot recovery` → LK грузит recovery после КАЖДОГО сброса (выход только Odin+TWRP).
+  Запускать пробы кнопками. Shim не должен сам перезагружаться (теперь висит `HOLD`).
+- Отладка без экрана: shim пишет журнал в **ramoops console** (`0x92140000`, заголовок
+  persistent_ram_buffer sig 0x43474244, start=size=len) ДО каждого шага → после сброса Android/TWRP
+  показывает его в `/sys/fs/pstore/console-ramoops-0`. Так найден сброс на MDP.
+
+Результат (журнал `D:\test1\ios-t290\logs\diag-run1-pstore.txt`, фото у пользователя):
+- EL1, MPIDR 0x80000100, MIDR 0x410fd034 (A53 r0p4); CNTFRQ 19.2 МГц; PSCI 1.0 по smc.
+- LK: x0 = DTB 0x83400000 (0x597a6 Б), /memory 0x80000000+1G, 0xc0000000+1G.
+- APSS WDT LK **не включает** (en=0).
+- Splash 0x90000000: **24 bpp (RGB888), stride 2400**, порядок байт в памяти **R,G,B**
+  (жёлтый вышел голубым при B,G,R). Видимая картинка **сдвинута по горизонтали** (строки
+  «заворачиваются», хвост слева) — точку начала скан-аута уточнить линейкой.
+- GCC: SDCC1 apps/ahb включены LK; **SDCC2 RCG (cmd=0x80000000) и ветки apps/ahb выключены**.
+  После включения ahb (CBCR 0x4301c bit0) регистры sdhc2 читаются: HC ver 0x4d02 (SDHCI 3.0),
+  cap 0x302dc8b2 (база 200 МГц), cap1 0x8007, clk 0x403, pstate 0x80000; core ver 0x1000004d.
+- Карта: CD GPIO67 in=0, pstate CD=0 — карта не вставлена (или полярность — проверить с картой).
+Следующее: цвета R,G,B + линейка для сдвига; включить apps-clk SDCC2 (RCG 0x43004/0x43008),
+питание карты (PM8953 L11/L12 через SPMI), карта в слоте → CMD0/CMD8/ACMD41.
+
 ## 2026-10-20 ~17:00: планшет разблокирован, TWRP, живой FDT
 
 - Загрузчик разблокирован пользователем (`ro.boot.flash.locked=0`, `verifiedbootstate=orange`),
