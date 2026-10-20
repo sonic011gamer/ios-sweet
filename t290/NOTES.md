@@ -50,7 +50,15 @@
   1 CPU). Логотип Apple от backboardd через теневой буфер, затем консольный этап (`SK[0]: __nexus_register …
   identityservices`), как в QEMU, затем lock screen. Журнал: `logs/xnu-boot3-head.txt` (dmesg-ramoops-0) и
   `xnu-boot3-tail.txt`. Карта: `SWEET SDHC: … 50 MHz, 1 MiB read in 44120 us` (~23 МБ/с, High Speed прошёл).
-- Дальше: `CPUS=4 mkboot-t290.sh` (образ `dl/k-t290dev3/t290-ios-recovery-4cpu.img`), GPU — `t290/GPU.md`.
+- Загрузка 4 (CPUS=4): `SWEET CPU: 4/4 CPUs initialized` (PSCI CPU_ON по SMC, MPIDR 0x101–0x103) → lock screen.
+  Зеркало pstore при 4 CPU обрывается рано (параллельные t290_prz_put без блокировки) — починить.
+- **Тач (0117, CI 39432676892, ~22:30): работает в iPadOS** (подтвердил пользователь). FT5452 @0x38:
+  QUP3 (0x78b7000) даёт `I2C_STATUS 0x1321c4` BUS ERROR (причина не найдена; FIFO v2 с 2 байтами
+  rx-тегов не помог), а bit-bang I2C на GPIO10/11 работает (shim touch1c: `BITBANG sda=1 scl=1 id=0x154`,
+  374 отчёта). Драйвер `bsd/dev/sweet_t290_touch.c`: L5/L10 через `sweet_t290_rpm_ldo()` (канал SMD
+  sweet_sdhc), reset GPIO64, опрос GPIO65 раз в 10 мс, bit-bang ~250 кГц; SweetHID: панель 800×1280 →
+  окно iPad 768×1024 @(16,128). mkboot: тач включён, CPUS по умолчанию 4.
+- GPU — `t290/GPU.md`.
 
 ## 2026-10-20 ~18:40: microSD отвечает на голом железе (diag milestone 3b)
 
