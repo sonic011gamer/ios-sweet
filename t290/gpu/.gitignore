@@ -1,2 +1,5 @@
 kgsl_hello
 kgsl_blit
+kgsl_compute
+kgsl_present
+*.bin
