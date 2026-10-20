@@ -969,6 +969,77 @@ static void sd_probe(void)
 	con_hex3("SPEED", "err=", bad, "us=", (uint32_t)us, "KBps=", us ? (uint32_t)(1048576ULL * 1000 / us) : 0);
 }
 
+/*
+ * ---- gpu1: is the Adreno 504 reachable? (build with -DT290_GPU_PROBE) ----
+ * t290/GPU.md: oxili_gx GDSC on and unclamped, gfx3d at 200 MHz from GPLL0,
+ * the GPU clock branches on, then read a few status registers. Every step is
+ * logged first, so a reset names the access that caused it.
+ */
+#define GCC_GFX3D_CMD		0x59000
+#define GCC_GFX3D_CFG		0x59004
+#define GCC_OXILI_GX_GDSCR	0x5901c
+#define GCC_OXILI_CX_GDSCR	0x59044
+#define GCC_OXILI_GFX3D_CBCR	0x59020
+#define GCC_OXILI_AHB_CBCR	0x59028
+#define GCC_BIMC_GFX_CBCR	0x59034
+#define GCC_GX_CLAMP_IO		0x5b00c
+#define GPU_BASE		0x01c00000UL
+#define A5XX(r)			(GPU_BASE + 4 * (r))
+#define A5XX_RBBM_STATUS	0x4f5
+#define A5XX_RBBM_INT_0_STATUS	0x4e1
+#define A5XX_RBBM_SECVID_TRUST	0xf400
+#define A5XX_CP_HW_FAULT	0xb1a
+#define A5XX_CP_PFP_ME_CNTL	0x832
+#define A5XX_RBBM_AHB_CNTL0	0x93
+
+static uint32_t gdsc_on(uint32_t gdscr)
+{
+	uintptr_t r = GCC_BASE + gdscr;
+	wr32(r, rd32(r) & ~1U);			/* clear SW_COLLAPSE */
+	for (int i = 0; i < 100 && !(rd32(r) & (1U << 31)); i++)
+		delay_ms(1);			/* PWR_ON */
+	return rd32(r);
+}
+
+static void __attribute__((unused)) gpu_probe(void)
+{
+	con_quiet = 0;
+	STEP("gpu gdsc cx");
+	uint32_t cx = gdsc_on(GCC_OXILI_CX_GDSCR);
+	STEP("gpu gdsc gx");
+	uint32_t gx = gdsc_on(GCC_OXILI_GX_GDSCR);
+	con_hex3("GDSC", "cx=", cx, "gx=", gx, "clamp=", rd32(GCC_BASE + GCC_GX_CLAMP_IO));
+	STEP("gpu unclamp");
+	wr32(GCC_BASE + GCC_GX_CLAMP_IO, 0);
+	STEP("gpu gfx3d 200M");
+	wr32(GCC_BASE + GCC_GFX3D_CFG, (2 * 4 - 1) | 1 << 8);	/* GPLL0 / 4 */
+	wr32(GCC_BASE + GCC_GFX3D_CMD, rd32(GCC_BASE + GCC_GFX3D_CMD) | 1);
+	for (int i = 0; i < 100 && (rd32(GCC_BASE + GCC_GFX3D_CMD) & 1); i++)
+		delay_ms(1);
+	STEP("gpu branches");
+	int a = clk_on(GCC_OXILI_AHB_CBCR);
+	int b = clk_on(GCC_BIMC_GFX_CBCR);
+	int c = clk_on(GCC_OXILI_GFX3D_CBCR);
+	con_hex3("GPUCLK", "ahb=", rd32(GCC_BASE + GCC_OXILI_AHB_CBCR) | a,
+		 "bimc=", rd32(GCC_BASE + GCC_BIMC_GFX_CBCR) | b,
+		 "core=", rd32(GCC_BASE + GCC_OXILI_GFX3D_CBCR) | c);
+	con_hex3("GFX3D", "cmd=", rd32(GCC_BASE + GCC_GFX3D_CMD), "cfg=", rd32(GCC_BASE + GCC_GFX3D_CFG), 0, 0);
+	if (!a || !c) {
+		con_str("GPU", "clocks did not start; not touching the GPU");
+		return;
+	}
+	STEP("gpu read rbbm_status");
+	uint32_t st = rd32(A5XX(A5XX_RBBM_STATUS));
+	STEP("gpu read int/fault");
+	con_hex3("RBBM", "status=", st, "int0=", rd32(A5XX(A5XX_RBBM_INT_0_STATUS)),
+		 "cpfault=", rd32(A5XX(A5XX_CP_HW_FAULT)));
+	STEP("gpu read me_cntl/ahb");
+	con_hex3("CP", "pfp_me=", rd32(A5XX(A5XX_CP_PFP_ME_CNTL)), "ahb0=", rd32(A5XX(A5XX_RBBM_AHB_CNTL0)), 0, 0);
+	STEP("gpu read secvid");
+	con_hex3("SECVID", "trust=", rd32(A5XX(A5XX_RBBM_SECVID_TRUST)), 0, 0, 0, 0);
+	con_str("GPU", "registers answered");
+}
+
 static void show_sd(void)
 {
 	con_quiet = 1;
@@ -1151,6 +1222,12 @@ void shim_main(uint64_t dtb)
 	con_str("T290", "milestone 5: xnu loader / diagnostics");
 	con_hex3("RUN", "n=", runs, "dtb=", (uint32_t)dtb, 0, 0);
 	/* An xnu payload in the ramdisk means: boot it. */
+#if defined(T290_GPU_PROBE)
+	gpu_probe();
+	con_str("DONE", "gpu1 probe: take a photo");
+	STEP("done");
+	hold();
+#endif
 	const char *why = xnu_boot(dtb);
 	con_str("LOADER", why);
 	STEP("regs");

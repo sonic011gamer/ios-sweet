@@ -6,12 +6,12 @@
 # LK accepts it. Output: out/t290-diag.img (64 MiB, flash to recovery).
 #   t290/shim/build.sh STOCK_BOOT.img MAGISKBOOT FIX_BOOTABLE_IMAGE.py [PAYLOAD]
 # PAYLOAD: tools/mkpayload.py output (kernel + ADT); without it the shim runs
-# the microSD diagnostics.
+# the microSD diagnostics. EXTRA_CFLAGS=-DT290_GPU_PROBE builds the GPU probe instead.
 set -euo pipefail
 cd "$(dirname "$0")"
 STOCK=$1 MAGISKBOOT=$2 FIX=$3 PAYLOAD=${4:-}
 CC=aarch64-linux-gnu-gcc
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra ${EXTRA_CFLAGS:-}"
 S=../../shim
 mkdir -p out
 $CC $CFLAGS -c $S/start.S -o out/start.o
