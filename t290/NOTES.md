@@ -28,6 +28,22 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
+## 2026-10-20 ~16:00: iPadOS userland в QEMU, логотип Apple (прогон ios3)
+
+CI 39321740004 (189dc00), `qemu-ios.sh` SMP=1 на свежей копии корня iPad 5:
+корень `vblkroot0` смонтирован, **launchd стартовал**, через ~800 с — около 100 демонов
+(`exec ...` в msgbuf), SpringBoard (pid 25) и backboardd (pid 56) живы, на экране **логотип Apple**.
+Ошибок virtio-blk нет. Стеки SpringBoard/backboardd на 242 с и 365 с совпадают — ждут в mach_msg
+(наблюдение); при этом работает `com.apple.datamigrator` — гипотеза: первая загрузка, SpringBoard
+ждёт миграцию данных, а TCG на одном vCPU очень медленный. Не проверено.
+Результаты: `D:\test1\qemu-out\ios3\shot-*.png`, `D:\test1\qemu-out\mb-ios3.txt` (вне git).
+
+Почему ios2 падал (`SWEET VBLK: ... status 255`, `load_init_program ... errno 5`): кончилось место на C:
+(ext4.vhdx WSL вырос до 105 ГБ). Теперь большие файлы — на D:: чистый корень
+`D:\test1\ios-images\ipad5-root.pristine.img`, рабочая копия `/root/ios/TAG.img` в WSL (удалять после прогона),
+старое содержимое WSL — `D:\wsl-backup\` (tar). QEMU нужно держать в foreground-вызове `wsl`:
+`nohup ... &` внутри `wsl bash -c` умирает при выходе wsl.exe.
+
 ## 🎉 2026-10-20 ~03:40: ядро T290 доходит до userspace в QEMU
 
 CI 39309753629 (0101–0110 + firehose -mcpu в workflow), `qemu-t290.sh` (cortex-a53, GICv2,
@@ -47,7 +63,7 @@ RAM-диск init): `BSD root: md0` → `*** SWEET userspace: init running as PI
 (`qemu-sweet.py --gdbport`); `D:\test1\dl\ci-boot.sh RUN TAG` = дождаться CI → скачать →
 скан LSE во всём ядре (`dl/bt/kscan.sh`) → загрузка с msgbuf/bt (`dl/bt/dbgboot.sh`).
 
-Образ iPadOS: `/root/ios/ipad5-root.img` (+ `.pristine.img`) в WSL, 11 ГБ на HFS+ 16 ГБ, fsck OK.
+Образ iPadOS: чистый — `D:	est1ios-imagesipad5-root.pristine.img` (раньше `/root/ios/` в WSL), 11 ГБ на HFS+ 16 ГБ, fsck OK.
 Собран `t290/tools/mkroot-ipad5.sh` (stage в ext4 → tar → KVM-гость с Ubuntu-ядром,
 hfsplus.ko + nls_utf8.ko + busybox распаковывает в HFS+). Предупреждение: в образе iPad нет
 system-контейнера mobileactivationd (data ark не записан).
