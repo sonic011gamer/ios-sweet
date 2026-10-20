@@ -1,0 +1,182 @@
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index c86b9e7..ede28cb 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -276,6 +276,65 @@ extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c *
+ int sweet_console_muted;
+ #endif
+ 
++#if defined(SWEET_T290)
++/*
++ * SM-T290: no UART on the board's connector, so the console is mirrored
++ * into the ramoops console zone the tablet's Linux reserves
++ * (reserved-memory ramoops@92100000: one 256K dump record, then the
++ * console). DDR survives the reset, and the next Android/TWRP boot shows
++ * everything in /sys/fs/pstore/console-ramoops-0 (persistent_ram_buffer:
++ * sig "DBGC", start, size, data). Started from fbcon_probe() once
++ * ml_io_map works; the bytes logged before are copied from sweet_log's
++ * ring first.
++ */
++#define T290_PRZ_PHYS   0x92140000UL
++#define T290_PRZ_SIZE   0x40000U
++#define T290_PRZ_DATA   (T290_PRZ_SIZE - 12)
++#define T290_PRZ_SIG    0x43474244U
++
++static volatile uint8_t *t290_prz;
++static uint32_t t290_prz_pos, t290_prz_full;
++
++static void
++t290_prz_put(const char *c, int size)
++{
++	volatile uint32_t *hdr = (volatile uint32_t *)t290_prz;
++	for (int i = 0; i < size; i++) {
++		t290_prz[12 + t290_prz_pos] = (uint8_t)c[i];
++		if (++t290_prz_pos == T290_PRZ_DATA) {
++			t290_prz_pos = 0;
++			t290_prz_full = 1;
++		}
++	}
++	hdr[1] = t290_prz_pos;                                 /* start */
++	hdr[2] = t290_prz_full ? T290_PRZ_DATA : t290_prz_pos; /* size */
++}
++
++void sweet_t290_pstore_init(void);
++
++void
++sweet_t290_pstore_init(void)
++{
++	extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++	extern uint64_t sweet_log_position(void);
++	volatile uint8_t *m = (volatile uint8_t *)ml_io_map(T290_PRZ_PHYS, T290_PRZ_SIZE);
++	if (m == NULL || t290_prz != NULL) {
++		return;
++	}
++	((volatile uint32_t *)m)[0] = T290_PRZ_SIG;
++	((volatile uint32_t *)m)[1] = 0;
++	((volatile uint32_t *)m)[2] = 0;
++	uint64_t total = sweet_log_position();
++	uint64_t pos = total > T290_PRZ_DATA ? total - T290_PRZ_DATA : 0;
++	char chunk[256];
++	uint32_t n;
++	t290_prz = m;
++	while (pos < total && (n = sweet_log_copy(&pos, chunk, sizeof(chunk))) > 0) {
++		t290_prz_put(chunk, (int)n);
++	}
++}
++#endif
++
+ static inline void
+ _cnputs(char *c, int size, bool poll)
+ {
+@@ -283,6 +342,11 @@ _cnputs(char *c, int size, bool poll)
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	sweet_log_append(c, size);
++#if defined(SWEET_T290)
++	if (t290_prz != NULL && size > 0) {
++		t290_prz_put(c, size);
++	}
++#endif
+ 	if (sweet_console_muted && !panic_active()) {
+ 		return;
+ 	}
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 19f27cd..052e46c 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -706,9 +706,13 @@ register_serial_functions(struct pe_serial_functions *fns)
+  * the boot framebuffer described by the ADT node "sweet-fbcon":
+  *   reg    = <phys size>       absolute physical address, not arm-io relative
+  *   width, height              pixels
+- *   stride                     bytes per line, 32bpp
++ *   stride                     bytes per line
++ *   bpp (optional)             bytes per pixel, 4 (default) or 3
++ *   shift (optional)           pixels the panel scans the buffer out to the
++ *                              right, with wrap-around (SM-T290 splash: 229)
+  * Lines wrap back to the top instead of scrolling; the line after the cursor
+- * is kept blank so the newest output is easy to find.
++ * is kept blank so the newest output is easy to find. Text is white on
++ * black, so the colour order of a 24 bpp splash does not matter.
+  */
+ 
+ extern unsigned char iso_font[256 * 16];
+@@ -720,14 +724,36 @@ extern unsigned char iso_font[256 * 16];
+ static volatile uint32_t *fbcon_base;
+ static uint32_t fbcon_width, fbcon_height, fbcon_stride;
+ static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
++static uint32_t fbcon_bpp = 4, fbcon_shift;
++
++/* One pixel at screen (x, y): honours bpp and the scan-out shift. */
++static void
++fbcon_px(uint32_t x, uint32_t y, uint32_t argb)
++{
++	if (fbcon_bpp == 4 && !fbcon_shift) {
++		fbcon_base[y * (fbcon_stride / 4) + x] = argb;
++		return;
++	}
++	if (x < fbcon_shift) {
++		if (y == 0) {
++			return;
++		}
++		x += fbcon_width;
++		y--;
++	}
++	x -= fbcon_shift;
++	volatile uint8_t *b = (volatile uint8_t *)fbcon_base + y * fbcon_stride + x * fbcon_bpp;
++	for (uint32_t i = 0; i < fbcon_bpp; i++) {
++		b[i] = (uint8_t)(argb >> (8 * i));
++	}
++}
+ 
+ static void
+ fbcon_clear_row(uint32_t row)
+ {
+ 	for (uint32_t y = row * 16 * FBCON_SCALE; y < (row + 1) * 16 * FBCON_SCALE; y++) {
+-		volatile uint32_t *line = fbcon_base + y * (fbcon_stride / 4);
+ 		for (uint32_t x = 0; x < fbcon_width; x++) {
+-			line[x] = FBCON_BG;
++			fbcon_px(x, y, FBCON_BG);
+ 		}
+ 	}
+ }
+@@ -776,11 +802,10 @@ fbcon_transmit_data(uint8_t c)
+ 	uint32_t x0 = fbcon_col * 8 * FBCON_SCALE, y0 = fbcon_row * 16 * FBCON_SCALE;
+ 	for (uint32_t gy = 0; gy < 16; gy++) {
+ 		for (uint32_t sy = 0; sy < FBCON_SCALE; sy++) {
+-			volatile uint32_t *line = fbcon_base + (y0 + gy * FBCON_SCALE + sy) * (fbcon_stride / 4) + x0;
+ 			for (uint32_t gx = 0; gx < 8; gx++) {
+ 				uint32_t px = (glyph[gy] & (1u << gx)) ? FBCON_FG : FBCON_BG;
+ 				for (uint32_t sx = 0; sx < FBCON_SCALE; sx++) {
+-					line[gx * FBCON_SCALE + sx] = px;
++					fbcon_px(x0 + gx * FBCON_SCALE + sx, y0 + gy * FBCON_SCALE + sy, px);
+ 				}
+ 			}
+ 		}
+@@ -818,6 +843,10 @@ fbcon_probe(void)
+ 	uint32_t const *val;
+ 	unsigned int size;
+ 
++#if defined(SWEET_T290)
++	extern void sweet_t290_pstore_init(void);       /* osfmk/console/serial_console.c */
++	sweet_t290_pstore_init();
++#endif
+ 	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
+ 	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
+ 		return;
+@@ -831,7 +860,15 @@ fbcon_probe(void)
+ 	if (SecureDTGetProperty(entry, "stride", (void const **)&val, &size) == kSuccess) {
+ 		fbcon_stride = *val;
+ 	}
+-	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4) {
++	if (SecureDTGetProperty(entry, "bpp", (void const **)&val, &size) == kSuccess &&
++	    (*val == 3 || *val == 4)) {
++		fbcon_bpp = *val;
++	}
++	if (SecureDTGetProperty(entry, "shift", (void const **)&val, &size) == kSuccess) {
++		fbcon_shift = *val;
++	}
++	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * fbcon_bpp ||
++	    fbcon_shift >= fbcon_width) {
+ 		return;
+ 	}
+ 	sweet_early_mark(17, "fbcon config read; mapping");

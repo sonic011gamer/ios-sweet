@@ -8,8 +8,8 @@ framebuffer. Usage:  mkadt_t290.py OUT.adt [--qemu [--smp N]] [--fb WxH] [--dump
 
 --qemu: QEMU virt with -M virt,gic-version=2 -cpu cortex-a53 (t290/tools/qemu-t290.sh).
 Hardware addresses: msm8937.dtsi / sdm429-cpu.dtsi of LineageOS
-android_kernel_samsung_sdm429 (see t290/NOTES.md); not yet checked against the
-tablet's live FDT.
+android_kernel_samsung_sdm429; GIC, timer, CPUs, RAM and the splash checked
+against the tablet's live FDT and on the hardware (see t290/NOTES.md).
 """
 import os, sys
 
@@ -29,9 +29,11 @@ CPU_HZ = 1958400000
 # RAM above every reserved-memory carve-out of msm8937.dtsi (highest:
 # ss_plog 0x92200000 + 4M) and the splash buffer, up to the 2 GiB bank end.
 PHYS_BASE, MEM_SIZE = 0xa0000000, 0x60000000
-# cont_splash_mem: 0x90000000, 0x1400000; 800x1280 panel, 32 bpp assumed
+# cont_splash_mem: 0x90000000, 0x1400000; 800x1280 panel. Measured on the
+# tablet (t290/shim/diag.c): 24 bpp, bytes R,B,G, scan-out shifted 229 px.
 FB, FB_SIZE = 0x90000000, 0x1400000
 FB_W, FB_H = 800, 1280
+FB_BPP, FB_SHIFT = 3, 229
 
 QEMU_GICD, QEMU_GICC, QEMU_TIMEBASE = 0x08000000, 0x08010000, 62500000
 QEMU_VTIMER_INTID = 27
@@ -100,8 +102,15 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1):
 
     if fb_w * fb_h * 4 > FB_SIZE:
         raise SystemExit(f'--fb {fb_w}x{fb_h} does not fit the {FB_SIZE:#x} splash region')
-    set_props(child(root, 'sweet-fbcon'), reg=u64(FB, FB_SIZE), width=u32(fb_w),
-              height=u32(fb_h), stride=u32(fb_w * 4))
+    if qemu:
+        set_props(child(root, 'sweet-fbcon'), reg=u64(FB, FB_SIZE), width=u32(fb_w),
+                  height=u32(fb_h), stride=u32(fb_w * 4))
+    else:
+        # The tablet's LK splash (t290/shim diag): RGB888, panel scans the
+        # buffer out 229 pixels to the right with wrap-around.
+        set_props(child(root, 'sweet-fbcon'), reg=u64(FB, FB_SIZE), width=u32(fb_w),
+                  height=u32(fb_h), stride=u32(fb_w * FB_BPP), bpp=u32(FB_BPP),
+                  shift=u32(FB_SHIFT))
     set_props(child(child(root, 'arm-io'), 'disp0'), canvas_width=u32(1536), canvas_height=u32(2048))
 
     # Home-button iPad: no home-button-type (0 = Home button), J71sAP's names.
