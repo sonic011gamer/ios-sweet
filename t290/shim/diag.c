@@ -1121,8 +1121,11 @@ static uint32_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t n
 	qup_wr(QUP_IO_MODE, 3 << 14);			/* FIFO mode, pack/unpack */
 	qup_wr(QUP_I2C_CLK_CTL, 3 << 8 | ((19200000 / 400000) / 2 - 3));
 	qup_wr(QUP_I2C_MASTER_GEN, 1);			/* V2 tags */
+	/* Linux qup_i2c_poll_state_i2c_master: wait for an idle bus first */
+	for (int i = 0; i < 50 && (qup(QUP_I2C_STATUS) & (1 << 8)); i++)
+		delay_ms(1);
 	qup_wr(QUP_MX_WRITE_CNT, t);
-	qup_wr(QUP_MX_READ_CNT, n);
+	qup_wr(QUP_MX_READ_CNT, n + 2);			/* v2: 2 tag bytes precede the data */
 	if (!qup_state(1))
 		return 0x200000;
 	for (uint32_t i = 0; i < t; i += 4) {
@@ -1131,7 +1134,7 @@ static uint32_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t n
 			w |= (uint32_t)tx[i + k] << (8 * k);
 		qup_wr(QUP_OUT_FIFO, w);
 	}
-	uint32_t got = 0, err = 0;
+	uint32_t got = 0, err = 0, skip = 2;
 	uint64_t end = now() + timer_hz() / 1000 * 50;
 	while (got < n && now() < end) {
 		uint32_t st = qup(QUP_I2C_STATUS);
@@ -1141,8 +1144,13 @@ static uint32_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t n
 		}
 		if (qup(QUP_OPERATIONAL) & (1 << 5)) {	/* IN_NOT_EMPTY */
 			uint32_t w = qup(QUP_IN_FIFO);
-			for (int k = 0; k < 4 && got < n; k++)
+			for (int k = 0; k < 4 && got < n; k++) {
+				if (skip) {
+					skip--;
+					continue;
+				}
 				buf[got++] = (uint8_t)(w >> (8 * k));
+			}
 		}
 	}
 	uint32_t ef = qup(QUP_ERROR_FLAGS);
@@ -1175,6 +1183,8 @@ static void __attribute__((unused)) touch_probe(void)
 	con_hex3("TSPWR", "rpm=", rpm, "l5=", a5, "l10=", a10);
 
 	STEP("touch pins");
+	con_hex3("PINS", "g10=", rd32(TLMM_BASE + 10 * 0x1000), "g11=", rd32(TLMM_BASE + 11 * 0x1000),
+		 "g64=", rd32(TLMM_BASE + 64 * 0x1000));
 	tlmm_cfg(10, 2, 0, 2, 0);		/* SDA: blsp_i2c3, no pull */
 	tlmm_cfg(11, 2, 0, 2, 0);		/* SCL */
 	tlmm_cfg(65, 0, 3, 2, 0);		/* IRQ: input, pull-up */
