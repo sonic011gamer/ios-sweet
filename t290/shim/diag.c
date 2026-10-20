@@ -1040,6 +1040,199 @@ static void __attribute__((unused)) gpu_probe(void)
 	con_str("GPU", "registers answered");
 }
 
+/*
+ * ---- touch1: FocalTech FT5452 on BLSP1 QUP3 I2C (build with -DT290_TOUCH_PROBE) ----
+ * Live FDT: i2c@78b7000 (qcom,i2c-msm-v2, 400 kHz from 19.2 MHz), SDA/SCL
+ * GPIO10/11 function 2 (blsp_i2c3), touch @0x38, reset GPIO64, IRQ GPIO65
+ * (active low), rails pm8953 L10 3.3 V / L5 1.8 V (RPM). QUP v2 tags in
+ * FIFO mode as Linux i2c-qup.c: START+addr, DATAWR n, data, START+addr|1,
+ * DATARD_STOP n; the input FIFO returns data only.
+ */
+#define QUP_PHYS		0x078b7000UL
+#define QUP_CONFIG		0x000
+#define QUP_STATE		0x004
+#define QUP_IO_MODE		0x008
+#define QUP_SW_RESET		0x00c
+#define QUP_OPERATIONAL		0x018
+#define QUP_ERROR_FLAGS		0x01c
+#define QUP_HW_VERSION		0x030
+#define QUP_OUT_FIFO		0x110
+#define QUP_MX_WRITE_CNT	0x150
+#define QUP_MX_READ_CNT		0x208
+#define QUP_IN_FIFO		0x218
+#define QUP_I2C_CLK_CTL		0x400
+#define QUP_I2C_STATUS		0x404
+#define QUP_I2C_MASTER_GEN	0x408
+#define GCC_BLSP1_QUP3_I2C_CMD	0x04000
+#define GCC_BLSP1_QUP3_I2C_CBCR	0x04020
+#define GCC_APCS_BRANCH_VOTE	0x45004		/* bit 10: blsp1 ahb */
+#define FTS_ADDR		0x38
+
+static uint32_t qup(uint32_t off) { return rd32(QUP_PHYS + off); }
+static void qup_wr(uint32_t off, uint32_t v) { wr32(QUP_PHYS + off, v); }
+
+static int qup_state(uint32_t s)
+{
+	for (int i = 0; i < 100; i++) {
+		if (qup(QUP_STATE) & 4)		/* STATE_VALID */
+			break;
+		delay_ms(1);
+	}
+	qup_wr(QUP_STATE, s);
+	for (int i = 0; i < 100; i++) {
+		uint32_t v = qup(QUP_STATE);
+		if ((v & 4) && (v & 3) == s)
+			return 1;
+		delay_ms(1);
+	}
+	return 0;
+}
+
+static void tlmm_cfg(unsigned gpio, unsigned func, unsigned pull, unsigned ma, int out)
+{
+	wr32(TLMM_BASE + gpio * 0x1000, pull | func << 2 | (ma / 2 - 1) << 6 | (out ? 1U << 9 : 0));
+}
+
+static void tlmm_set(unsigned gpio, int high)
+{
+	wr32(TLMM_BASE + gpio * 0x1000 + 4, high ? 2 : 0);
+}
+
+static int tlmm_get(unsigned gpio)
+{
+	return rd32(TLMM_BASE + gpio * 0x1000 + 4) & 1;
+}
+
+/* Write reg, then read n bytes (repeated start). Returns 0 or error bits. */
+static uint32_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t n)
+{
+	uint8_t tx[12];
+	uint32_t t = 0;
+	tx[t++] = 0x81; tx[t++] = (uint8_t)(addr << 1);		/* START, write */
+	tx[t++] = 0x82; tx[t++] = 1; tx[t++] = reg;		/* DATAWR 1 */
+	tx[t++] = 0x81; tx[t++] = (uint8_t)(addr << 1 | 1);	/* START, read */
+	tx[t++] = 0x87; tx[t++] = (uint8_t)n;			/* DATARD_STOP n */
+
+	qup_wr(QUP_SW_RESET, 1);
+	delay_ms(1);
+	if (!qup_state(0))
+		return 0x100000;
+	qup_wr(QUP_CONFIG, 2 << 8 | 7);			/* I2C mini core, N 7 (v2) */
+	qup_wr(QUP_IO_MODE, 3 << 14);			/* FIFO mode, pack/unpack */
+	qup_wr(QUP_I2C_CLK_CTL, 3 << 8 | ((19200000 / 400000) / 2 - 3));
+	qup_wr(QUP_I2C_MASTER_GEN, 1);			/* V2 tags */
+	qup_wr(QUP_MX_WRITE_CNT, t);
+	qup_wr(QUP_MX_READ_CNT, n);
+	if (!qup_state(1))
+		return 0x200000;
+	for (uint32_t i = 0; i < t; i += 4) {
+		uint32_t w = 0;
+		for (uint32_t k = 0; k < 4 && i + k < t; k++)
+			w |= (uint32_t)tx[i + k] << (8 * k);
+		qup_wr(QUP_OUT_FIFO, w);
+	}
+	uint32_t got = 0, err = 0;
+	uint64_t end = now() + timer_hz() / 1000 * 50;
+	while (got < n && now() < end) {
+		uint32_t st = qup(QUP_I2C_STATUS);
+		if (st & 0x38000fcU) {			/* I2C_STATUS_ERROR_MASK (incl. NACK) */
+			err = st;
+			break;
+		}
+		if (qup(QUP_OPERATIONAL) & (1 << 5)) {	/* IN_NOT_EMPTY */
+			uint32_t w = qup(QUP_IN_FIFO);
+			for (int k = 0; k < 4 && got < n; k++)
+				buf[got++] = (uint8_t)(w >> (8 * k));
+		}
+	}
+	uint32_t ef = qup(QUP_ERROR_FLAGS);
+	qup_state(0);
+	if (err || got < n)
+		return (err ? err : 0x400000) | (ef & 0x7c);
+	return 0;
+}
+
+/* a 5x5 dot at screen (x, y) */
+static void dot(int x, int y, uint32_t c)
+{
+	for (int dy = -2; dy <= 2; dy++)
+		for (int dx = -2; dx <= 2; dx++)
+			if (x + dx >= 0 && x + dx < FB_W && y + dy >= 0 && y + dy < FB_H)
+				put_px(x + dx, y + dy, c);
+}
+
+static void __attribute__((unused)) touch_probe(void)
+{
+	static const uint32_t l10[] = { RPM_KEY_UV, 3300000, RPM_KEY_SWEN, 1 };
+	static const uint32_t l5[] = { RPM_KEY_UV, 1800000, RPM_KEY_SWEN, 1 };
+
+	con_quiet = 1;
+	STEP("touch rpm");
+	int rpm = smd_find_rpm() && smd_open();
+	uint32_t a5 = rpm ? rpm_req(RPM_LDOA, 5, l5, 2) : 0;
+	uint32_t a10 = rpm ? rpm_req(RPM_LDOA, 10, l10, 2) : 0;
+	con_quiet = 0;
+	con_hex3("TSPWR", "rpm=", rpm, "l5=", a5, "l10=", a10);
+
+	STEP("touch pins");
+	tlmm_cfg(10, 2, 0, 2, 0);		/* SDA: blsp_i2c3, no pull */
+	tlmm_cfg(11, 2, 0, 2, 0);		/* SCL */
+	tlmm_cfg(65, 0, 3, 2, 0);		/* IRQ: input, pull-up */
+	tlmm_cfg(64, 0, 3, 8, 1);		/* RESET: output */
+	tlmm_set(64, 0);
+	delay_ms(10);
+	tlmm_set(64, 1);
+
+	STEP("touch qup clocks");
+	wr32(GCC_BASE + GCC_APCS_BRANCH_VOTE, rd32(GCC_BASE + GCC_APCS_BRANCH_VOTE) | 1U << 10);
+	wr32(GCC_BASE + GCC_BLSP1_QUP3_I2C_CMD + 4, 0);		/* CFG: XO, no divider */
+	wr32(GCC_BASE + GCC_BLSP1_QUP3_I2C_CMD, rd32(GCC_BASE + GCC_BLSP1_QUP3_I2C_CMD) | 1);
+	delay_ms(2);
+	int qc = clk_on(GCC_BLSP1_QUP3_I2C_CBCR);
+	delay_ms(250);				/* FT5452 boot after reset */
+	STEP("touch qup regs");
+	con_hex3("QUP", "clk=", qc, "hwver=", qup(QUP_HW_VERSION), "io=", qup(QUP_IO_MODE));
+
+	STEP("touch read chip id");
+	uint8_t id[2] = { 0, 0 };
+	uint32_t e = i2c_read_reg(FTS_ADDR, 0xa3, id, 1);
+	con_hex3("FTS", "err=", e, "chip=", id[0], "irq=", tlmm_get(65));
+	if (e) {
+		con_str("TOUCH", "no answer from the touch controller");
+		return;
+	}
+
+	STEP("touch loop");
+	con_str("TOUCH", "draw with a finger for 60 s");
+	int last_row = row;
+	uint64_t end = now() + timer_hz() * 60;
+	uint32_t reports = 0, errs = 0;
+	while (now() < end) {
+		if (tlmm_get(65)) {			/* IRQ line high: nothing new */
+			continue;
+		}
+		uint8_t b[63];
+		if (i2c_read_reg(FTS_ADDR, 0, b, sizeof(b))) {
+			errs++;
+			delay_ms(5);
+			continue;
+		}
+		reports++;
+		for (unsigned i = 0; i < 10; i++) {
+			const uint8_t *p = b + 3 + 6 * i;
+			unsigned ev = p[0] >> 6, tid = p[2] >> 4;
+			if (tid >= 10 || ev == 1)
+				continue;
+			int x = (p[0] & 15) << 8 | p[1], y = (p[2] & 15) << 8 | p[3];
+			dot(x, y, tid == 0 ? YELLOW : tid == 1 ? GREEN : RED);
+			row = last_row;
+			con_hex3("XY", "x=", (uint32_t)x, "y=", (uint32_t)y, "id=", tid);
+		}
+	}
+	row = last_row + 1;
+	con_hex3("TOUCH", "reports=", reports, "errors=", errs, 0, 0);
+}
+
 static void show_sd(void)
 {
 	con_quiet = 1;
@@ -1222,6 +1415,12 @@ void shim_main(uint64_t dtb)
 	con_str("T290", "milestone 5: xnu loader / diagnostics");
 	con_hex3("RUN", "n=", runs, "dtb=", (uint32_t)dtb, 0, 0);
 	/* An xnu payload in the ramdisk means: boot it. */
+#if defined(T290_TOUCH_PROBE)
+	touch_probe();
+	con_str("DONE", "touch1 probe: take a photo");
+	STEP("done");
+	hold();
+#endif
 #if defined(T290_GPU_PROBE)
 	gpu_probe();
 	con_str("DONE", "gpu1 probe: take a photo");
