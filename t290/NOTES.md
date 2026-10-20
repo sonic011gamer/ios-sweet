@@ -28,6 +28,26 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
+## 🎉 2026-10-20 ~20:10: XNU + iPadOS userland на ПЛАНШЕТЕ с microSD
+
+Как запускать: `t290/tools/mkboot-t290.sh KERNEL OUT.img STOCK_BOOT MAGISKBOOT FIX.py` → recovery-образ
+(t290 shim как iBoot + payload mkpayload: ядро + ADT mkadt_t290 без --qemu; boot-args rd=sdroot0 sdrw=1 cpus=1).
+Пишется из Android: `adb push` + `su -c dd of=/dev/block/by-name/recovery`. Запуск: выкл → Vol+ +Power.
+Выход: Vol− + Power → Android; журнал ядра: `/sys/fs/pstore/console-ramoops-0` (последние 256К),
+с 0116 ещё `dmesg-ramoops-0` (первые 256К загрузки). Логи: `D:\test1\ios-t290\logs\xnu-boot*-pstore.txt`.
+Корень iPadOS на карте: `D:\test1\ios-t290\tools\write-sd.ps1` (админ; диск 2 «Generic Flash-Disk» USB,
+проверка имени/шины/размера, 16 ГиБ за 23 мин ≈ 12 МБ/с, сверка 6 участков). Вся карта = том HFSX, без MBR.
+
+- Загрузка 1 (CI 39412629412, 0113+0114): ядро доходит до IOKit, panic `SWEET CPU: expected boot MPIDR 0`
+  (SweetCPU.cpp:169) — у планшета загрузочное ядро MPIDR 0x100. → **0115**.
+- Загрузка 2 (CI 39418230815): sdroot0 смонтирован, launchd и десятки служб работают; GUI-процессы падают:
+  `NSInternalInconsistencyException: We expect a valid bounds for configuration … Main-External mode 0x0`
+  — AppleCLCD отказался от 24-bpp буфера (`fRowBytes < fWidth*4`), основного дисплея нет. Журнал
+  (256К) весь забит этим спамом — ранние строки ядра потеряны. → **0116**: теневой буфер 1536×2048 BGRA
+  (iPad 5) → на каждом flush ½ (nearest), по центру 800×1280, байты R,B,G, сдвиг из ADT sweet-fbcon;
+  первые 256К консоли в зону dump ramoops (0x92100000) без перезаписи.
+- Загрузка 3 (CI 39422813087): ждёт пробы.
+
 ## 2026-10-20 ~18:40: microSD отвечает на голом железе (diag milestone 3b)
 
 Цепочка, которая работает (всё в `t290/shim/diag.c`):
