@@ -163,7 +163,8 @@ int main(int argc, char **argv)
 	int max_reg = strtol(argv[3], 0, 0), max_half = strtol(argv[4], 0, 0);
 	int dbg = argc > 5 && !strcmp(argv[5], "dbg");	/* present_dbg.asm: dst[y*768+x] = x | y << 16 */
 	/* LOCAL=1 env: one invocation per group (present1.asm) */
-	const unsigned local = getenv("LOCAL1") ? 1 : 64, gx = SW / 2 / local, gy = SH / 2;
+	const unsigned local = getenv("LOCAL1") ? 1 : getenv("LOCAL") ? strtoul(getenv("LOCAL"), 0, 0) : 64;
+	const unsigned gx = SW / 2 / local, gy = SH / 2;
 
 	int fd = open("/dev/kgsl-3d0", O_RDWR);
 	if (fd < 0) {
@@ -229,8 +230,11 @@ int main(int argc, char **argv)
 	reg(HLSQ_MODE_CNTL, 0x00000001);
 
 	reg(SP_SP_CNTL, 0);
-	reg(HLSQ_CONTROL_0_REG, 0x880);
-	reg(SP_CS_CTRL_REG0, (unsigned)(max_half + 1) << 4 | (unsigned)(max_reg + 1) << 10 | 0x4 | 0x2);
+	/* experiments: REG0X ORs bits into SP_CS_CTRL_REG0, FOURQ selects FOUR_QUADS */
+	unsigned fourq = getenv("FOURQ") ? 1 : 0;
+	reg(HLSQ_CONTROL_0_REG, fourq << 2 | 0x880);
+	reg(SP_CS_CTRL_REG0, fourq << 3 | (unsigned)(max_half + 1) << 4 | (unsigned)(max_reg + 1) << 10 | 0x4 | 0x2 |
+	    (getenv("REG0X") ? strtoul(getenv("REG0X"), 0, 0) : 0));
 	reg(HLSQ_CS_CONFIG, 1);
 	reg(HLSQ_CS_CNTL, instrlen << 1);
 	reg(SP_CS_CONFIG, 1);
@@ -247,7 +251,7 @@ int main(int argc, char **argv)
 	reg(HLSQ_UPDATE_CNTL, 0x1f00000);
 	/* present.asm: @wgid(r10.x), @invocationid(r0.x); regid = reg * 4 + comp */
 	OUT(pkt4(HLSQ_CS_CNTL_0, 2));
-	OUT(10 * 4 | REGID_NONE << 8 | REGID_NONE << 16 | 0u << 24);
+	OUT(getenv("CNTL0") ? strtoul(getenv("CNTL0"), 0, 0) : (10 * 4 | REGID_NONE << 8 | REGID_NONE << 16 | 0u << 24));
 	OUT(1);
 	OUT(pkt7(CP_LOAD_STATE4, 3));
 	OUT(0 | SS4_INDIRECT << 16 | SB4_CS_SHADER << 18 | instrlen << 22);
@@ -268,7 +272,7 @@ int main(int argc, char **argv)
 	OUT(0);
 
 	OUT(pkt4(HLSQ_CS_NDRANGE_0, 7));
-	OUT(2 | (local - 1) << 2 | 0 << 12 | 0 << 22);
+	OUT((getenv("KDIM") ? strtoul(getenv("KDIM"), 0, 0) : 3) | (local - 1) << 2 | 0 << 12 | 0 << 22);
 	OUT(local * gx);
 	OUT(0);
 	OUT(gy);
@@ -323,6 +327,14 @@ int main(int argc, char **argv)
 			}
 		printf("dbg: wait %s, %.0f us, unset %zu, wrong %zu of %u\n", werr ? strerror(werr) : "ok",
 		       t_gpu, unset, wrong, SW / 2 * SH / 2);
+		unsigned shown = 0;
+		for (unsigned i = 0; i < SW / 2 * SH / 2 && shown < 12; i++) {
+			uint32_t v = dst.cpu[i];
+			if (v != 0xeeeeeeeeu && v != ((i % (SW / 2)) | (i / (SW / 2)) << 16)) {
+				printf("wrong[%u] (x %u y %u) = %08x\n", i, i % (SW / 2), i / (SW / 2), v);
+				shown++;
+			}
+		}
 		for (unsigned y = 0; y < 3; y++) {
 			printf("row %u:", y);
 			for (unsigned x = 0; x < 6; x++)

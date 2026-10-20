@@ -85,10 +85,36 @@ gpuclk 320 MHz, /dev/kgsl-3d0 world-rw. uapi header: research/kgsl/msm_kgsl.h
 - The panel's byte order R,B,G is not reachable with the 2D engine's four
   colour swaps (they form the dihedral group of the 4-cycle); the final
   shuffle + 229 px shift needs a shader (or the CPU).
-**Next:** compute shaders. Mesa's `computerator` runs ir3 compute shaders on
-a5xx (src/freedreno/computerator/a5xx.cc) through DRM/msm; port its state
-emission to kgsl and assemble shaders with Mesa's ir3 assembler. One compute
-pass could do halve + R,B,G + shift straight into the splash buffer.
+### Compute shaders (2026-10-20 night)
+- **Assembler:** Mesa 24.2.8 (archive.mesa3d.org, D:\test1\dl\mesa) built in
+  WSL with meson 1.5.2 + mako wheels fetched through Windows (WSL has no
+  network); `t290/gpu/ir3asm` = Mesa's ir3 assembler without a DRM device
+  (gpu_id 506 = a5xx ISA). Build: `t290/gpu/ir3asm/build-ir3asm.sh ~/mesa-src/mesa-24.2.8`.
+  Gotchas: ALU immediates are 11-bit signed (3072 encodes as -1024); cat3 (mad)
+  sources cannot be constants (c1.x silently became r1.x); stg.u8 stores from
+  half registers (cov.u32u16 first); release build skips the "wgid >= r48" assert.
+- **State:** `t290/gpu/kgsl_compute.c` = Mesa fd5_compute.c (cs_program_emit,
+  fd5_launch_grid) + compute-relevant fd5_emit_restore over kgsl:
+  SP_CS_CTRL_REG0, HLSQ_CS_CONFIG/CNTL/CONSTLEN, SP_CS_OBJ_START, CP_LOAD_STATE4
+  (shader indirect + constants direct), HLSQ_CS_NDRANGE, CP_EXEC_CS.
+  `shaders/store1.asm` -> buffer[0] = 0xc0de. **First shader on the A504.**
+- **Present shader:** `shaders/present1.asm` (one invocation per group, grid
+  768x1024): halve + R,B,G + 229 px shift, **0 of 3072000 bytes differ** from the
+  CPU reference (kgsl_present). But 243 ms: the local invocation id never
+  arrives - in 2/4/8/16/64-wide groups only lane 0 writes (r0.x = 0 for all
+  or other lanes idle). Tried KERNELDIM 1/2/3, SP_CS_CTRL_REG0 VARYING,
+  FOUR_QUADS, r0.x in every HLSQ_CS_CNTL_0 field: no change. WGIDCONSTID = r10.x
+  does deliver the work-group id. Unsolved.
+- CPU reference of the same present from cached memory: ~5.5 ms (WC memory:
+  91 ms). So the present path is not the bottleneck worth a GPU; CoreAnimation's
+  software rendering is. GPU work should target composition/rendering.
+
+**Next ideas:** (1) local id: compile a real NIR compute shader with Mesa's ir3
+for a5xx (load_local_invocation_id) and diff the variant/sysval setup against
+ours; capture the blob's command stream (kgsl, e.g. a GLES compute dispatch
+from an Android app) and compare HLSQ/SP CS registers. (2) 2D scaling: the
+"few more registers" Mesa mentions - capture a scaled blit from the blob
+(C2D / GLES glBlitFramebuffer). (3) Bare-metal: zap shader via TZ (a506_zap).
 
 ## Open questions
 1. SMMU: bypass or context bank programming from EL1 (Linux kgsl does it, so
