@@ -43,6 +43,7 @@ static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; 
 #define SDC2_CORE	0x07864000UL	/* Qualcomm core_mem */
 #define TLMM_BASE	0x01000000UL
 #define SD_CD_GPIO	67
+#define TLMM_SDC2_CTL	0x109000	/* sdc2 clk/cmd/data pull + drive (pinctrl-msm8937) */
 
 /* APSS watchdog (qcom,msm-watchdog): LK leaves it running, ~18 s to bite. */
 #define WDT_BASE	0x0b017000UL
@@ -130,14 +131,32 @@ static uint32_t fb_stride = FB_W * 4, fb_bpp = 4;
 static uint32_t bg;
 static int row;
 
+/*
+ * The panel shows the buffer shifted right by ~229 pixels with wrap-around
+ * (milestone 2 ruler photo: buffer x 0 appeared at screen x ~229), so
+ * screen (x, y) lives at buffer (x - SCAN_SHIFT, y), one row up when that
+ * goes negative.
+ */
+#define SCAN_SHIFT	229
+
 static void put_px(int x, int y, uint32_t rgb)
 {
+	x -= SCAN_SHIFT;
+	if (x < 0) {
+		x += FB_W;
+		y -= 1;
+	}
+	if (y < 0)
+		return;
 	uintptr_t p = fb + (uintptr_t)y * fb_stride + (uintptr_t)x * fb_bpp;
 	volatile uint8_t *b = (volatile uint8_t *)p;
-	/* MDP RGB888 / ARGB8888 in memory: B, G, R (, A) on Qualcomm splash */
-	b[0] = rgb & 0xff;
-	b[1] = (rgb >> 8) & 0xff;
-	b[2] = (rgb >> 16) & 0xff;
+	/*
+	 * LK's splash bytes are R, B, G: with B,G,R yellow showed cyan, with
+	 * R,G,B green showed blue and yellow magenta.
+	 */
+	b[0] = (rgb >> 16) & 0xff;
+	b[1] = rgb & 0xff;
+	b[2] = (rgb >> 8) & 0xff;
 	if (fb_bpp == 4)
 		b[3] = 0xff;
 }
@@ -151,13 +170,12 @@ static void con_clear(uint32_t c)
 	row = 0;
 }
 
-static void put_char(int col, char ch, uint32_t fg)
+static void draw_glyph(int x0, int y0, char ch, uint32_t fg)
 {
 	if (ch < 0x20 || ch > 0x7e)
 		ch = '?';
 	const unsigned char *g = font8x16[ch - 0x20];
-	int x0 = MARGIN + col * CH_W, y0 = MARGIN + row * CH_H;
-	if (x0 + CH_W > FB_W || y0 + CH_H > FB_H)
+	if (x0 < 0 || x0 + CH_W > FB_W || y0 + CH_H > FB_H)
 		return;
 	for (int gy = 0; gy < 16; gy++)
 		for (int gx = 0; gx < 8; gx++) {
@@ -166,6 +184,33 @@ static void put_char(int col, char ch, uint32_t fg)
 				for (int sx = 0; sx < SCALE; sx++)
 					put_px(x0 + gx * SCALE + sx, y0 + gy * SCALE + sy, c);
 		}
+}
+
+static void put_char(int col, char ch, uint32_t fg)
+{
+	draw_glyph(MARGIN + col * CH_W, MARGIN + row * CH_H, ch, fg);
+}
+
+/*
+ * Ruler along the top: a bar and a digit every 50 pixels of buffer x
+ * (digit = x / 50 mod 10, bars alternate red/green). A photo then shows
+ * which buffer column the panel's left edge scans out.
+ */
+static void draw_ruler(void)
+{
+	/* screen coordinates now: if SCAN_SHIFT is right, bar 0 hugs the left edge */
+	for (int n = 0; n * 50 < FB_W; n++) {
+		uint32_t c = (n & 1) ? GREEN : RED;
+		for (int y = 0; y < 40; y++)
+			for (int x = 0; x < 4; x++)
+				put_px(n * 50 + x, y, c);
+		draw_glyph(n * 50 + 8, 4, '0' + n % 10, n % 10 == 0 ? YELLOW : WHITE);
+	}
+	/* fine ticks every 10 px along the left edge, for the next correction */
+	for (int x = 0; x < 100; x += 10)
+		for (int y = 40; y < (x % 50 ? 52 : 60); y++)
+			put_px(x, y, WHITE);
+	row = 2;
 }
 
 static int put_str(int col, const char *s, uint32_t fg)
@@ -310,7 +355,7 @@ static int prop_is(uintptr_t p, const char *s)
 	return *s == 0 && *(volatile char *)p == 0;
 }
 
-static void show_dtb(uintptr_t dtb)
+static void __attribute__((unused)) show_dtb(uintptr_t dtb)
 {
 	if (!dtb || be32(dtb) != 0xd00dfeed) {
 		con_hex3("DTB", "at=", (uint32_t)dtb, "bad=", dtb ? be32(dtb) : 0, 0, 0);
@@ -393,7 +438,7 @@ static void detect_splash_format(void)
 	/* all-constant buffer: no evidence, keep the 32 bpp default */
 }
 
-static void show_splash_format(void)
+static void __attribute__((unused)) show_splash_format(void)
 {
 	con_hex3("FBSCAN", "nz=", fb_nonzero, "v0=", fb_vary[0], "v3=", fb_vary[3]);
 	con_hex3("FB", "at=", (uint32_t)fb, "stride=", fb_stride, "bpp=", fb_bpp * 8);
@@ -411,6 +456,407 @@ static int clk_on(uint32_t cbcr)
 		delay_ms(1);
 	}
 	return 0;
+}
+
+/*
+ * microSD bring-up on sdhc2, read-only: 400 kHz from XO through the SDCC2
+ * RCG, SDHCI mode, bus power (with the Qualcomm power-control handshake),
+ * then CMD0, CMD8, ACMD41, CMD2 (CID), CMD3 (RCA), CMD9 (CSD).
+ */
+#define GCC_SDCC2_M	0x4300c
+#define GCC_SDCC2_N	0x43010
+#define GCC_SDCC2_D	0x43014
+
+#define HC_ARG		0x08
+#define HC_XFER_CMD	0x0c	/* transfer mode | command << 16, one 32-bit write */
+#define HC_RESP		0x10
+#define HC_PSTATE	0x24
+#define HC_CTL		0x28	/* host ctl | power << 8 */
+#define HC_CLK		0x2c	/* clock ctl | timeout << 16 | reset << 24 */
+#define HC_INT		0x30	/* normal | error << 16, write 1 to clear */
+#define HC_INT_EN	0x34
+
+#define CORE_HC_MODE	0x78
+#define CORE_PWR_ST	0xdc
+#define CORE_PWR_CLR	0xe4
+#define CORE_PWR_CTL	0xe8
+
+#define RSP_NONE	0x00
+#define RSP_136		0x09	/* 136-bit, CRC */
+#define RSP_48		0x1a	/* 48-bit, CRC, index */
+#define RSP_48_NOCRC	0x02
+
+static uint32_t sd_resp[4];
+
+static uint32_t hc(uint32_t off) { return rd32(SDC2_HC + off); }
+static void hc_wr(uint32_t off, uint32_t v) { wr32(SDC2_HC + off, v); }
+
+/* Acknowledge the core's power-control request (sdhci-msm pwr_irq) by polling. */
+static uint32_t sd_pwr_ack(unsigned ms)
+{
+	for (unsigned i = 0; i < ms; i++) {
+		uint32_t st = rd32(SDC2_CORE + CORE_PWR_ST);
+		if (st) {
+			uint32_t ctl = 0;
+			wr32(SDC2_CORE + CORE_PWR_CLR, st);
+			if (st & 3)		/* bus off / on */
+				ctl |= 1;	/* bus success */
+			if (st & 0xc)		/* io low / high */
+				ctl |= 4;	/* io success */
+			wr32(SDC2_CORE + CORE_PWR_CTL, ctl);
+			return st;
+		}
+		delay_ms(1);
+	}
+	return 0;
+}
+
+static int sd_reset(uint32_t bit)
+{
+	hc_wr(HC_CLK, hc(HC_CLK) | bit << 24);
+	for (int i = 0; i < 100; i++) {
+		if (!(hc(HC_CLK) & bit << 24))
+			return 1;
+		delay_ms(1);
+	}
+	return 0;
+}
+
+/* 0 = ok; else error-interrupt bits | 0x10000 (0x20000 = no completion). */
+static uint32_t sd_cmd(uint32_t idx, uint32_t arg, uint32_t rsp)
+{
+	for (int i = 0; hc(HC_PSTATE) & 1; i++) {
+		if (i > 100)
+			return 0x40000;
+		delay_ms(1);
+	}
+	hc_wr(HC_INT, 0xffffffff);
+	hc_wr(HC_ARG, arg);
+	hc_wr(HC_XFER_CMD, (idx << 8 | rsp) << 16);
+	for (int i = 0; i < 200; i++) {
+		uint32_t st = hc(HC_INT);
+		if (st & 0x8000) {
+			hc_wr(HC_INT, st);
+			sd_reset(2);	/* CMD line */
+			return (st >> 16) | 0x10000;
+		}
+		if (st & 1) {
+			hc_wr(HC_INT, 1);
+			for (int k = 0; k < 4; k++)
+				sd_resp[k] = hc(HC_RESP + 4 * k);
+			return 0;
+		}
+		delay_ms(1);
+	}
+	sd_reset(2);
+	return 0x20000;
+}
+
+/*
+ * RPM requests over SMD, the way Qualcomm's LK does it (rpm-smd.c, smd.c):
+ * the microSD rails pm8953 L11 (card) and L12 (pads) belong to the RPM.
+ * SMEM 0x86300000, legacy global TOC: item 13 = channel allocation table,
+ * 14 + cid = the two word-access half channels (APPS tx, RPM tx),
+ * 338 + cid = FIFO (APPS->RPM half, then RPM->APPS). Android's debugfs:
+ * rpm_requests is cid 4, packet mode, 0x400-byte FIFOs.
+ */
+#define SMEM_BASE		0x86300000UL
+#define SMEM_TOC		(SMEM_BASE + 208)	/* after proc_comm[4], version[32], heap_info */
+#define SMEM_ALLOC_TBL		13
+#define SMEM_SMD_BASE		14
+#define SMEM_SMD_FIFO		338
+#define APCS_IPC		0x0b011008UL
+#define RPM_IPC_BIT		1
+
+/* smd_half_channel_word_access, 11 words */
+#define HC_STATE	0
+#define HC_DSR		1
+#define HC_CTS		2
+#define HC_CD		3
+#define HC_RI		4
+#define HC_FHEAD	5
+#define HC_FTAIL	6
+#define HC_FSTATE	7
+#define HC_FBLOCK	8
+#define HC_TAIL		9
+#define HC_HEAD		10
+#define SS_OPENING	1
+#define SS_OPENED	2
+
+static uintptr_t smd_tx, smd_rx, smd_fifo_tx, smd_fifo_rx;
+static uint32_t smd_fifo_sz, rpm_msg_id;
+
+static uintptr_t smem_item(uint32_t id, uint32_t *size)
+{
+	uintptr_t e = SMEM_TOC + id * 16;
+	if (!rd32(e))
+		return 0;
+	if (size)
+		*size = rd32(e + 8);
+	uint32_t base = rd32(e + 12) & ~3U;
+	return (base ? base : SMEM_BASE) + rd32(e + 4);
+}
+
+static uint32_t hch(uintptr_t h, int w) { return rd32(h + 4 * w); }
+static void hch_wr(uintptr_t h, int w, uint32_t v) { wr32(h + 4 * w, v); }
+
+static void rpm_kick(void)
+{
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr32(APCS_IPC, RPM_IPC_BIT);
+}
+
+static int smd_find_rpm(void)
+{
+	uint32_t tsize = 0;
+	uintptr_t tbl = smem_item(SMEM_ALLOC_TBL, &tsize);
+	con_hex3("SMEM", "ver=", rd32(SMEM_BASE + 64 + 7 * 4), "tbl=", (uint32_t)tbl, "tsz=", tsize);
+	if (!tbl)
+		return 0;
+	for (uint32_t i = 0; i + 32 <= tsize && i < 64 * 32; i += 32) {
+		static const char want[] = "rpm_requests";
+		int j = 0;
+		while (want[j] && *(volatile char *)(tbl + i + j) == want[j])
+			j++;
+		uint32_t ctype = rd32(tbl + i + 24);
+		if (want[j] || *(volatile char *)(tbl + i + j) || (ctype & 0xff) != 0x0f)
+			continue;	/* name or edge (APPS<->RPM = 0x0f) differs */
+		uint32_t cid = rd32(tbl + i + 20), fsz = 0;
+		uintptr_t sh = smem_item(SMEM_SMD_BASE + cid, 0);
+		uintptr_t fifo = smem_item(SMEM_SMD_FIFO + cid, &fsz);
+		con_hex3("RPMCH", "cid=", cid, "sh=", (uint32_t)sh, "fifo=", (uint32_t)fifo);
+		if (!sh || !fifo || fsz < 2 * 64)
+			return 0;
+		smd_tx = sh;
+		smd_rx = sh + 11 * 4;
+		smd_fifo_sz = fsz / 2;
+		smd_fifo_tx = fifo;
+		smd_fifo_rx = fifo + smd_fifo_sz;
+		return 1;
+	}
+	con_str("RPMCH", "rpm_requests not in the allocation table");
+	return 0;
+}
+
+static int smd_open(void)
+{
+	con_hex3("SMDST", "tx=", hch(smd_tx, HC_STATE), "rx=", hch(smd_rx, HC_STATE),
+		 "fsz=", smd_fifo_sz);
+	con_hex3("SMDIX", "txh=", hch(smd_tx, HC_HEAD), "txt=", hch(smd_tx, HC_TAIL),
+		 "rxh=", hch(smd_rx, HC_HEAD));
+	if (hch(smd_tx, HC_STATE) == SS_OPENED && hch(smd_rx, HC_STATE) == SS_OPENED)
+		return 1;
+	/*
+	 * LK's smd_set_state(OPENING) then (OPENED). Linux smd_state_change():
+	 * going OPENING from CLOSED/CLOSING restarts both FIFOs at 0 (our head,
+	 * our read position in RPM's half); RPM does the same on its side.
+	 * Writing on at LK's old head made RPM read garbage and reset the SoC.
+	 */
+	hch_wr(smd_tx, HC_HEAD, 0);
+	hch_wr(smd_rx, HC_TAIL, 0);
+	hch_wr(smd_tx, HC_FBLOCK, 0);
+	hch_wr(smd_tx, HC_STATE, SS_OPENING);
+	hch_wr(smd_tx, HC_DSR, 0);
+	hch_wr(smd_tx, HC_CTS, 0);
+	hch_wr(smd_tx, HC_CD, 0);
+	hch_wr(smd_tx, HC_FSTATE, 1);
+	rpm_kick();
+	for (int i = 0; i < 1000; i++) {
+		uint32_t r = hch(smd_rx, HC_STATE);
+		if (r == SS_OPENING || r == SS_OPENED)
+			break;
+		delay_ms(1);
+	}
+	uint32_t r = hch(smd_rx, HC_STATE);
+	if (r != SS_OPENING && r != SS_OPENED) {
+		con_hex3("SMDOPEN", "rpm_state=", r, 0, 0, 0, 0);
+		return 0;
+	}
+	hch_wr(smd_tx, HC_STATE, SS_OPENED);
+	hch_wr(smd_tx, HC_DSR, 1);
+	hch_wr(smd_tx, HC_CTS, 1);
+	hch_wr(smd_tx, HC_CD, 1);
+	hch_wr(smd_tx, HC_FSTATE, 1);
+	rpm_kick();
+	for (int i = 0; i < 1000 && hch(smd_rx, HC_STATE) != SS_OPENED; i++)
+		delay_ms(1);
+	con_hex3("SMDOPEN", "tx=", hch(smd_tx, HC_STATE), "rx=", hch(smd_rx, HC_STATE), 0, 0);
+	con_hex3("SMDIX2", "txh=", hch(smd_tx, HC_HEAD), "txt=", hch(smd_tx, HC_TAIL),
+		 "rxh=", hch(smd_rx, HC_HEAD));
+	return hch(smd_rx, HC_STATE) == SS_OPENED;
+}
+
+static void smd_put(uint32_t *head, uint32_t w)
+{
+	wr32(smd_fifo_tx + *head, w);
+	*head = (*head + 4) % smd_fifo_sz;
+}
+
+/*
+ * One "req" to the active set: resource type/id with key/value pairs
+ * {key, len 4, value}. Returns RPM's reply word count seen, 0 if none.
+ */
+static uint32_t rpm_req(uint32_t rtype, uint32_t rid, const uint32_t *kv, int nkv)
+{
+	uint32_t data_len = nkv * 12;
+	uint32_t req_len = 5 * 4 + data_len;		/* msg_id, set, type, id, data_len + kvps */
+	uint32_t pkt_len = 2 * 4 + req_len;		/* service 'req', length */
+	uint32_t head = hch(smd_tx, HC_HEAD);
+	uint32_t free = (hch(smd_tx, HC_TAIL) + smd_fifo_sz - head - 4) % smd_fifo_sz;
+	if (free < pkt_len + 20)
+		return 0;
+	uint32_t rx_before = hch(smd_rx, HC_HEAD);
+
+	/* SMD packet header: payload length, then four reserved words */
+	smd_put(&head, pkt_len);
+	for (int i = 0; i < 4; i++)
+		smd_put(&head, 0);
+	smd_put(&head, 0x00716572);		/* "req" */
+	smd_put(&head, req_len);
+	smd_put(&head, ++rpm_msg_id);
+	smd_put(&head, 0);			/* active set */
+	smd_put(&head, rtype);
+	smd_put(&head, rid);
+	smd_put(&head, data_len);
+	for (int i = 0; i < nkv; i++) {
+		smd_put(&head, kv[2 * i]);
+		smd_put(&head, 4);
+		smd_put(&head, kv[2 * i + 1]);
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	hch_wr(smd_tx, HC_HEAD, head);
+	hch_wr(smd_tx, HC_FHEAD, 1);
+	rpm_kick();
+
+	for (int i = 0; i < 200; i++) {
+		if (hch(smd_rx, HC_HEAD) != rx_before)
+			break;
+		delay_ms(1);
+	}
+	uint32_t rx_head = hch(smd_rx, HC_HEAD);
+	uint32_t got = (rx_head + smd_fifo_sz - rx_before) % smd_fifo_sz;
+	if (got) {
+		/* consume RPM's reply: tail of the RPM half channel is ours */
+		hch_wr(smd_rx, HC_TAIL, rx_head);
+		hch_wr(smd_rx, HC_FTAIL, 1);
+		rpm_kick();
+	}
+	return got;
+}
+
+#define RPM_LDOA	0x616f646c	/* "ldoa" */
+#define RPM_KEY_SWEN	0x6e657773	/* "swen" */
+#define RPM_KEY_UV	0x00007675	/* "uv" */
+
+static int sd_power_on(void)
+{
+	STEP("smem find rpm");
+	if (!smd_find_rpm())
+		return 0;
+	STEP("smd open");
+	if (!smd_open())
+		return 0;
+	static const uint32_t on_2v95[] = { RPM_KEY_UV, 2950000, RPM_KEY_SWEN, 1 };
+	STEP("rpm L12 on");
+	uint32_t a12 = rpm_req(RPM_LDOA, 12, on_2v95, 2);
+	STEP("rpm L11 on");
+	uint32_t a11 = rpm_req(RPM_LDOA, 11, on_2v95, 2);
+	con_hex3("RPMREQ", "l12=", a12, "l11=", a11, "id=", rpm_msg_id);
+	delay_ms(50);	/* rail ramp */
+	return a12 && a11;
+}
+
+static void sd_probe(void)
+{
+	char name[6];
+
+	STEP("sdc2 pads");
+	/* clk 16 mA no pull, cmd/data pull-up 10 mA (Linux sdc2 "active") */
+	wr32(TLMM_BASE + TLMM_SDC2_CTL, 3 << 11 | 3 << 9 | 7 << 6 | 4 << 3 | 4);
+	int pwr = sd_power_on();
+	con_hex3("SDPWR", "ok=", pwr, "pads=", rd32(TLMM_BASE + TLMM_SDC2_CTL), 0, 0);
+
+	STEP("sdcc2 rcg 400k");
+	wr32(GCC_BASE + GCC_SDCC2_M, 1);
+	wr32(GCC_BASE + GCC_SDCC2_N, ~(4U - 1) & 0xff);
+	wr32(GCC_BASE + GCC_SDCC2_D, ~4U & 0xff);
+	wr32(GCC_BASE + GCC_SDCC2_CFG, (2 * 12 - 1) | 0 << 8 | 2 << 12);	/* XO /12, M/N 1/4, dual edge */
+	wr32(GCC_BASE + GCC_SDCC2_CMD, rd32(GCC_BASE + GCC_SDCC2_CMD) | 1);	/* update */
+	for (int i = 0; i < 100 && (rd32(GCC_BASE + GCC_SDCC2_CMD) & 1); i++)
+		delay_ms(1);
+	STEP("sdcc2 apps on");
+	int apps = clk_on(GCC_SDCC2_APPS);
+	con_hex3("SDCLK", "apps=", rd32(GCC_BASE + GCC_SDCC2_APPS), "cmd=", rd32(GCC_BASE + GCC_SDCC2_CMD),
+		 "ok=", apps);
+	if (!apps)
+		return;
+
+	STEP("sdhci mode + reset");
+	wr32(SDC2_CORE + CORE_HC_MODE, 1 | 1U << 13);	/* HC_MODE_EN, FF_CLK_SW_RST_DIS */
+	int rst = sd_reset(1);
+	uint32_t pw0 = sd_pwr_ack(20);
+	STEP("sd clock + power");
+	hc_wr(HC_INT_EN, 0xffffffff);
+	hc_wr(HC_CLK, 0x0e << 16 | 0x0001);		/* internal clock, base / 1 */
+	for (int i = 0; i < 100 && !(hc(HC_CLK) & 2); i++)
+		delay_ms(1);
+	hc_wr(HC_CLK, hc(HC_CLK) | 0x0004);		/* SD clock on */
+	hc_wr(HC_CTL, (hc(HC_CTL) & ~0xff00U) | 0x0f00);	/* 3.3 V, bus power */
+	uint32_t pw1 = sd_pwr_ack(50);
+	delay_ms(20);
+	con_hex3("SDHC", "rst=", rst, "pw=", pw0 << 16 | pw1, "clk=", hc(HC_CLK));
+	con_hex3("SDHC", "ctl=", hc(HC_CTL), "pstate=", hc(HC_PSTATE), 0, 0);
+
+	STEP("cmd0");
+	uint32_t e0 = sd_cmd(0, 0, RSP_NONE);
+	delay_ms(2);
+	STEP("cmd8");
+	uint32_t e8 = sd_cmd(8, 0x1aa, RSP_48);
+	uint32_t r8 = e8 ? 0 : sd_resp[0];
+	con_hex3("CMD0/8", "e0=", e0, "e8=", e8, "r8=", r8);
+	if (e8 & 0x30000) {
+		con_str("SD", "no answer to CMD8: card absent or unpowered");
+		return;
+	}
+
+	STEP("acmd41");
+	uint32_t ocr = 0, e41 = 0;
+	for (int i = 0; i < 100; i++) {
+		e41 = sd_cmd(55, 0, RSP_48);
+		if (!e41)
+			e41 = sd_cmd(41, (r8 & 0xfff) == 0x1aa ? 0x40ff8000 : 0x00ff8000, RSP_48_NOCRC);
+		if (e41)
+			break;
+		ocr = sd_resp[0];
+		if (ocr & 0x80000000)
+			break;
+		delay_ms(10);
+	}
+	con_hex3("ACMD41", "err=", e41, "ocr=", ocr, 0, 0);
+	if (e41 || !(ocr & 0x80000000))
+		return;
+
+	STEP("cmd2 cid");
+	uint32_t e2 = sd_cmd(2, 0, RSP_136);
+	con_hex3("CID", "e=", e2, "w3=", sd_resp[3], "w2=", sd_resp[2]);
+	/* SDHCI drops the CRC byte: product name CID[103:64] = w2, w1 >> 24 */
+	name[0] = sd_resp[2] >> 24;
+	name[1] = sd_resp[2] >> 16;
+	name[2] = sd_resp[2] >> 8;
+	name[3] = sd_resp[2];
+	name[4] = sd_resp[1] >> 24;
+	name[5] = 0;
+	con_str("CARD", name);
+
+	STEP("cmd3 rca");
+	uint32_t e3 = sd_cmd(3, 0, RSP_48);
+	uint32_t rca = sd_resp[0] >> 16;
+	STEP("cmd9 csd");
+	uint32_t e9 = sd_cmd(9, rca << 16, RSP_136);
+	/* CSD v2: C_SIZE = CSD[69:48] = w1[29:8]; capacity (C_SIZE + 1) * 512 KiB */
+	uint32_t csize = (sd_resp[1] >> 8) & 0x3fffff;
+	con_hex3("CSD", "e=", e3 << 16 | e9, "rca=", rca, "csize=", csize);
+	con_hex3("SIZE", "MiB=", (csize + 1) / 2, "csd3=", sd_resp[3], 0, 0);
 }
 
 static void show_sd(void)
@@ -438,7 +884,9 @@ static void show_sd(void)
 		 "cap1=", rd32(SDC2_HC + 0x44));
 	con_hex3("CORE2", "pwr=", rd32(SDC2_CORE + 0x00), "ver=", rd32(SDC2_CORE + 0x50),
 		 "mode=", rd32(SDC2_CORE + 0x78));
-	con_hex3("CORE2", "pwrst=", rd32(SDC2_CORE + 0xdc), 0, 0, 0, 0);
+	con_hex3("CORE2", "pwrst=", rd32(SDC2_CORE + 0xdc), "pads=", rd32(TLMM_BASE + TLMM_SDC2_CTL), 0, 0);
+
+	sd_probe();
 }
 
 void shim_main(uint64_t dtb)
@@ -454,25 +902,14 @@ void shim_main(uint64_t dtb)
 	detect_splash_format();
 	STEP("clear screen");
 	con_clear(0x203040);
-	con_str("T290", "ios-t290 milestone 1: diagnostics");
+	draw_ruler();
+	con_str("T290", "milestone 3b: microSD power via RPM");
 	con_hex3("RUN", "n=", runs, "dtb=", (uint32_t)dtb, 0, 0);
-	row++;
 	STEP("regs");
-	con_hex3("CPU", "el=", (uint32_t)(rsr("CurrentEL") >> 2), "mpidr=", (uint32_t)rsr("mpidr_el1"),
-		 "midr=", (uint32_t)rsr("midr_el1"));
-	con_hex3("WDT", "en_was=", wdt_was, "en_now=", rd32(WDT_BASE + WDT_EN), "sts=", rd32(WDT_BASE + WDT_STS));
-	con_hex3("TIMER", "frq=", (uint32_t)rsr("cntfrq_el0"), "sctlr=", (uint32_t)rsr("sctlr_el1"), 0, 0);
-	STEP("dtb");
-	show_dtb(dtb);
-	row++;
-	STEP("fb format");
-	show_splash_format();
-	row++;
+	con_hex3("WDT", "en_was=", wdt_was, "en_now=", rd32(WDT_BASE + WDT_EN), 0, 0);
 	show_sd();
-	row++;
 	STEP("psci");
 	con_hex3("PSCI", "ver=", (uint32_t)smc(PSCI_VERSION, 0, 0, 0), 0, 0, 0, 0);
-	row++;
 	con_str("DONE", "take a photo of this screen");
 	STEP("done");
 	hold();

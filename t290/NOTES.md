@@ -28,6 +28,29 @@
   vbmeta p17, dtbo p27, userdata p69, persist p48, efs p43, sec_efs p42, modemst1/2 p40/p41,
   fsg p36, fsc p30, param p47. Размеры разделов, cmdline и /proc/device-tree без root не читаются.
 
+## 2026-10-20 ~18:40: microSD отвечает на голом железе (diag milestone 3b)
+
+Цепочка, которая работает (всё в `t290/shim/diag.c`):
+1. **Питание карты через RPM** (L11 = карта, L12 = контакты; оба `qcom,rpm-smd-regulator`, напрямую по SPMI нельзя).
+   SMEM 0x86300000 (ver 0xb), легаси-TOC с +208: item 13 = таблица каналов, `rpm_requests` cid 4
+   (ctype & 0xff == 0x0f), item 14+cid = половинки канала (word access, по 11 слов; APPS tx, RPM tx),
+   item 338+cid = FIFO (TOC reserved = база 0x60000 — RPM msg RAM): sh 0x60000, fifo 0x60800, 0x400 на сторону.
+   LK оставляет канал tx=CLOSED, rx=CLOSING. Открытие как в Linux smd_state_change: **обнулить tx.head
+   и rx.tail**, OPENING (+fSTATE, IPC 0xb011008 bit0), дождаться RPM OPENING/OPENED, OPENED + DSR/CTS/CD.
+   Без обнуления первый запрос валит RPM → сброс SoC. Запрос: SMD-заголовок 5 слов (len,0,0,0,0),
+   "req" 0x00716572, len, msg_id, set 0 (active), "ldoa", id, data_len, KVP {"uv" 2950000}, {"swen" 1}.
+   Ответ RPM — 0x28 байт на каждый запрос.
+2. Контакты sdc2: TLMM+0x109000 = 0x1fe4 (clk 16 мА без подтяжки, cmd/data pull-up 10 мА); LK оставляет 0xbdb (pull-down).
+3. Частота: GCC SDCC2 RCG 0x43004 (M 1, N ~3, D ~4, CFG XO/12 dual-edge = 400 кГц), ветки ahb 0x4301c и apps 0x43018.
+4. SDHCI: core+0x78 HC_MODE = 1|1<<13, SW reset, опрос/ACK pwr-irq (core 0xdc/0xe4/0xe8), clk ctl int+SD,
+   power 3.3 В. pstate 0x01f80000 (CMD/DAT в единице).
+5. CMD0, CMD8 → 0x1aa, ACMD41(0x40ff8000) → OCR 0xc0ff8000 (SDHC/SDXC), CMD2 CID (ADATA 0x1d "AD" "SD"),
+   CMD3 RCA 0x59b4, CMD9 C_SIZE 0x1ce7f = 59200 МиБ (карта 64 ГБ пользователя).
+
+Экран: байты в буфере **R, B, G**; видимая картинка = буфер со сдвигом **229 px вправо** с переносом
+(экранный x → буферный x−229, при x<0 +800 и строка −1) — линейка подтвердила.
+Следующее: CMD7 + CMD17 (чтение сектора 0 PIO), затем ADMA2 и драйвер sweet_sdhc для XNU (rd=sdroot0).
+
 ## 2026-10-20 ~18:05: первый наш код на планшете (t290/shim/diag.c) — работает
 
 `t290/shim/build.sh STOCK_BOOT MAGISKBOOT FIX_BOOTABLE_IMAGE.py` → `out/t290-diag.img`:
