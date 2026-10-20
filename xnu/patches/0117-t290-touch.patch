@@ -1,0 +1,448 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 55025d3..16ffebe 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_vblk.c			standard
+ bsd/dev/sweet_sdhc.c			standard
++bsd/dev/sweet_t290_touch.c		standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/sweet_sdhc.c b/bsd/dev/sweet_sdhc.c
+index 25f7abe..f136a40 100755
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -352,6 +352,25 @@ sd_rails_on(void)
+ 	return 0;
+ }
+ 
++/*
++ * Other T290 drivers (touch) switch RPM LDOs through the channel this
++ * driver opened: sweet_t290_rpm_ldo(5, 1800000). 0 or errno.
++ */
++int sweet_t290_rpm_ldo(uint32_t id, uint32_t uv);
++
++int
++sweet_t290_rpm_ldo(uint32_t id, uint32_t uv)
++{
++	const uint32_t kv[] = { RPM_KEY_UV, uv, RPM_KEY_SWEN, 1 };
++	if (!sd.ready || !sd.smd_tx) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&sweet_sdhc_lock);
++	uint32_t got = rpm_req(RPM_LDOA, id, kv, 2);
++	lck_mtx_unlock(&sweet_sdhc_lock);
++	return got ? 0 : EIO;
++}
++
+ /* ---- clocks, controller ---- */
+ 
+ static int
+@@ -916,6 +935,9 @@ sweet_sdhc_init(void)
+ 	printf("SWEET SDHC: sdroot0 %s, %llu MiB from sector %llu, %u MHz, 1 MiB read in %llu us%s\n",
+ 	    sd.writable ? "read-write" : "read-only", sd.nsectors / 2048, sd.first, sd.mhz,
+ 	    ns / 1000, e ? " (FAILED)" : "");
++
++	extern void sweet_t290_touch_init(void);        /* bsd/dev/sweet_t290_touch.c */
++	sweet_t290_touch_init();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/sweet_t290_touch.c b/bsd/dev/sweet_t290_touch.c
+new file mode 100755
+index 0000000..19e2b43
+--- /dev/null
++++ b/bsd/dev/sweet_t290_touch.c
+@@ -0,0 +1,323 @@
++/*
++ * SWEET_BOARD=t290: FocalTech FT5452 touch screen of the SM-T290.
++ *
++ * Live FDT: i2c@78b7000 (BLSP1 QUP3), touch @0x38, SDA/SCL GPIO10/11,
++ * reset GPIO64, IRQ GPIO65 (active low), rails pm8953 L5 1.8 V and L10
++ * 3.3 V (RPM, through sweet_sdhc.c's SMD channel). The QUP rejects our
++ * transfers with a bus error so far (t290/shim touch1), while a bit-banged
++ * bus on the same pins works: this driver bit-bangs (open drain through
++ * the TLMM output enable, ~250 kHz). One kernel thread polls every 10 ms,
++ * reads a report whenever the IRQ line is low and feeds sweet_hid_touch()
++ * with panel pixels (800x1280); SweetHID maps them onto the iPad picture.
++ * Disabled with boot-arg sweettouch=0.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_T290)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern int sweet_t290_rpm_ldo(uint32_t id, uint32_t uv);      /* bsd/dev/sweet_sdhc.c */
++void sweet_t290_touch_init(void);
++
++#define TLMM_PA         0x01000000UL
++#define GPIO_SDA        10
++#define GPIO_SCL        11
++#define GPIO_RESET      64
++#define GPIO_IRQ        65
++#define FTS_ADDR        0x38
++#define FTS_MAX         10
++#define FTS_W           800
++#define FTS_H           1280
++#define HALF_BIT_NS     2000            /* ~250 kHz */
++
++static struct {
++	vm_offset_t gpio[4];            /* TLMM pages of SDA, SCL, RESET, IRQ */
++	uint32_t active;
++	int x[FTS_MAX], y[FTS_MAX];
++	bool started;
++} ts;
++static int ts_sleep_chan;
++
++static vm_offset_t
++pin(unsigned gpio)
++{
++	switch (gpio) {
++	case GPIO_SDA: return ts.gpio[0];
++	case GPIO_SCL: return ts.gpio[1];
++	case GPIO_RESET: return ts.gpio[2];
++	default: return ts.gpio[3];
++	}
++}
++
++/* TLMM GPIO_CFG: pull [1:0], function [5:2], drive [8:6] = mA/2 - 1, OE bit 9 */
++static void
++pin_cfg(unsigned gpio, unsigned pull, unsigned ma, bool out)
++{
++	*(volatile uint32_t *)pin(gpio) = pull | (ma / 2 - 1) << 6 | (out ? 1U << 9 : 0);
++}
++
++static void
++pin_set(unsigned gpio, int high)
++{
++	*(volatile uint32_t *)(pin(gpio) + 4) = high ? 2 : 0;
++}
++
++static int
++pin_get(unsigned gpio)
++{
++	return *(volatile uint32_t *)(pin(gpio) + 4) & 1;
++}
++
++static void
++ts_wait_ms(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&ts_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++half_bit(void)
++{
++	uint64_t t;
++	nanoseconds_to_absolutetime(HALF_BIT_NS, &t);
++	t += mach_absolute_time();
++	while (mach_absolute_time() < t) {
++	}
++}
++
++/* open drain: low = output 0, high = released input (board pull-up) */
++static void
++line(unsigned gpio, int high)
++{
++	if (high) {
++		pin_cfg(gpio, 0, 2, false);
++	} else {
++		pin_set(gpio, 0);
++		pin_cfg(gpio, 0, 2, true);
++	}
++}
++
++static void
++bb_start(void)
++{
++	line(GPIO_SDA, 1); line(GPIO_SCL, 1); half_bit();
++	line(GPIO_SDA, 0); half_bit();
++	line(GPIO_SCL, 0); half_bit();
++}
++
++static void
++bb_stop(void)
++{
++	line(GPIO_SDA, 0); half_bit();
++	line(GPIO_SCL, 1); half_bit();
++	line(GPIO_SDA, 1); half_bit();
++}
++
++static bool
++bb_write(uint8_t v)
++{
++	for (int i = 7; i >= 0; i--) {
++		line(GPIO_SDA, (v >> i) & 1); half_bit();
++		line(GPIO_SCL, 1); half_bit();
++		line(GPIO_SCL, 0);
++	}
++	line(GPIO_SDA, 1); half_bit();
++	line(GPIO_SCL, 1); half_bit();
++	bool ack = !pin_get(GPIO_SDA);
++	line(GPIO_SCL, 0); half_bit();
++	return ack;
++}
++
++static uint8_t
++bb_read(bool ack)
++{
++	uint8_t v = 0;
++	line(GPIO_SDA, 1);
++	for (int i = 7; i >= 0; i--) {
++		half_bit();
++		line(GPIO_SCL, 1); half_bit();
++		v |= (uint8_t)(pin_get(GPIO_SDA) << i);
++		line(GPIO_SCL, 0);
++	}
++	line(GPIO_SDA, ack ? 0 : 1); half_bit();
++	line(GPIO_SCL, 1); half_bit();
++	line(GPIO_SCL, 0);
++	line(GPIO_SDA, 1);
++	return v;
++}
++
++static int
++fts_read(uint8_t reg, uint8_t *buf, unsigned n)
++{
++	int err = 0;
++	/* preemption only stretches the clock, which I2C allows */
++	bb_start();
++	if (!bb_write(FTS_ADDR << 1) || !bb_write(reg)) {
++		err = EIO;
++		goto stop;
++	}
++	bb_start();
++	if (!bb_write(FTS_ADDR << 1 | 1)) {
++		err = EIO;
++		goto stop;
++	}
++	for (unsigned i = 0; i < n; i++) {
++		buf[i] = bb_read(i + 1 < n);
++	}
++stop:
++	bb_stop();
++	return err;
++}
++
++static void
++ts_report(uint32_t mask, const int *x, const int *y)
++{
++	for (unsigned id = 0; id < FTS_MAX; id++) {
++		uint32_t bit = 1U << id;
++		if (mask & bit) {
++			if (!(ts.active & bit) || x[id] != ts.x[id] || y[id] != ts.y[id]) {
++				sweet_hid_touch((int)id, 1, x[id], y[id]);
++			}
++			ts.x[id] = x[id];
++			ts.y[id] = y[id];
++		} else if (ts.active & bit) {
++			sweet_hid_touch((int)id, 0, ts.x[id], ts.y[id]);
++		}
++	}
++	ts.active = mask;
++}
++
++/* FocalTech report: [2] = points, then 6 bytes per point from 3 (as sweet_touch.c) */
++static int
++fts_poll(void)
++{
++	uint8_t b[63];
++	int x[FTS_MAX] = {0}, y[FTS_MAX] = {0};
++	uint32_t mask = 0, seen = 0;
++	int err = fts_read(0, b, sizeof(b));
++	if (err) {
++		return err;
++	}
++	unsigned n = b[2] & 15U, active = 0;
++	if ((b[0] & 0x70U) || n > FTS_MAX) {
++		return EIO;
++	}
++	for (unsigned i = 0; i < FTS_MAX; i++) {
++		const uint8_t *p = b + 3 + 6 * i;
++		unsigned id = p[2] >> 4, event = p[0] >> 6;
++		if (id >= FTS_MAX) {
++			break;
++		}
++		if (seen & (1U << id)) {
++			return EIO;
++		}
++		seen |= 1U << id;
++		if (event == 1) {
++			continue;               /* up */
++		}
++		if (event == 3) {
++			return EIO;
++		}
++		unsigned px = (unsigned)(p[0] & 15) << 8 | p[1];
++		unsigned py = (unsigned)(p[2] & 15) << 8 | p[3];
++		if (px >= FTS_W || py >= FTS_H) {
++			return EIO;
++		}
++		mask |= 1U << id;
++		x[id] = (int)px;
++		y[id] = (int)py;
++		active++;
++	}
++	if (active != n) {
++		return EIO;
++	}
++	ts_report(mask, x, y);
++	return 0;
++}
++
++static void
++ts_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static const unsigned pins[4] = { GPIO_SDA, GPIO_SCL, GPIO_RESET, GPIO_IRQ };
++	for (int i = 0; i < 4; i++) {
++		ts.gpio[i] = ml_io_map(TLMM_PA + pins[i] * 0x1000, 0x1000);
++		if (!ts.gpio[i]) {
++			printf("SWEET TOUCH: TLMM mapping failed\n");
++			goto out;
++		}
++	}
++	int e5 = sweet_t290_rpm_ldo(5, 1800000);
++	int e10 = sweet_t290_rpm_ldo(10, 3300000);
++	if (e5 || e10) {
++		printf("SWEET TOUCH: rails L5/L10 failed (%d/%d)\n", e5, e10);
++		goto out;
++	}
++	pin_cfg(GPIO_IRQ, 3, 2, false);         /* input, pull-up */
++	pin_cfg(GPIO_RESET, 3, 8, true);
++	pin_set(GPIO_RESET, 0);
++	ts_wait_ms(10);
++	pin_set(GPIO_RESET, 1);
++	ts_wait_ms(250);
++	line(GPIO_SDA, 1);
++	line(GPIO_SCL, 1);
++
++	uint8_t id = 0;
++	int err = fts_read(0xa3, &id, 1);
++	printf("SWEET TOUCH: FT5452 on bit-banged GPIO10/11: err=%d chip=0x%02x irq=%d\n",
++	    err, id, pin_get(GPIO_IRQ));
++	if (err || id != 0x54) {
++		goto out;
++	}
++	unsigned errors = 0, ticks = 0;
++	for (;;) {
++		/* read while the IRQ line is low or a finger is down, else every 200 ms */
++		if (!pin_get(GPIO_IRQ) || ts.active || (++ticks % 20) == 0) {
++			if (fts_poll()) {
++				if ((errors++ % 100) == 0) {
++					printf("SWEET TOUCH: bad report (%u)\n", errors);
++				}
++				if (errors == 10) {
++					ts_report(0, ts.x, ts.y);
++				}
++			} else {
++				errors = 0;
++			}
++		}
++		ts_wait_ms(10);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_t290_touch_init(void)
++{
++	int enabled = 1;
++	thread_t thread;
++	if (ts.started) {
++		return;
++	}
++	ts.started = true;
++	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++		return;
++	}
++	if (kernel_thread_start(ts_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_T290 */
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..148f276 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -434,14 +434,28 @@ SweetHIDTouch::start(IOService *provider)
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++#if defined(SWEET_T290)
++	(void)native;
++	fLogicalW = 768;        /* the picture on the panel; x, y already relative to it */
++	fLogicalH = 1024;
++	fOffX = 0;
++	fOffY = 0;
++#else
+ 	fLogicalW = native ? 1080 : 1125;
+ 	fLogicalH = native ? 2400 : 2436;
+ 	fOffX = (fLogicalW - 1080) / 2;
+ 	fOffY = (fLogicalH - 2400) / 2;
++#endif
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
++#if defined(SWEET_T290)
++	/* the 768x1024-pixel picture on the 189 ppi panel */
++	setProperty("SurfaceWidth", (unsigned long long)(103 << 16), 32);	/* mm, 16.16 */
++	setProperty("SurfaceHeight", (unsigned long long)(138 << 16), 32);
++#else
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+ 	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
++#endif
+ 	gSweetTouch = this;
+ 	registerService();
+ 	IOLog("SWEET HID: touch registered\n");
+@@ -458,8 +472,19 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
++#if defined(SWEET_T290)
++	/*
++	 * SM-T290: 800x1280 panel pixels; the 1536x2048 iPad display is shown
++	 * halved, centred at (16, 128) (SweetFramebuffer.cpp t290Panel).
++	 */
++	x -= 16;
++	y -= 128;
++	x = x < 0 ? 0 : (x > 767 ? 767 : x);
++	y = y < 0 ? 0 : (y > 1023 ? 1023 : y);
++#else
+ 	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+ 	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++#endif
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -472,8 +497,13 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	if (!was && down) {
++#if defined(SWEET_T290)
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX / 2 || x > 767 - SWEET_TOUCH_EDGE_PX / 2 ||
++		    y < SWEET_TOUCH_EDGE_PX / 2 || y > 1023 - SWEET_TOUCH_EDGE_PX / 2;
++#else
+ 		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+ 		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++#endif
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
