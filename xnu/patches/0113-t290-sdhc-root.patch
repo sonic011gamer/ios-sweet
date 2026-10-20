@@ -1,0 +1,985 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index e25254b..55025d3 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -106,6 +106,7 @@ bsd/dev/random/randomdev.c		standard
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_vblk.c			standard
++bsd/dev/sweet_sdhc.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/sweet_sdhc.c b/bsd/dev/sweet_sdhc.c
+new file mode 100755
+index 0000000..25f7abe
+--- /dev/null
++++ b/bsd/dev/sweet_sdhc.c
+@@ -0,0 +1,941 @@
++/*
++ * SWEET microSD root device (SWEET_BOARD=t290: Galaxy Tab A 8.0, SDM429).
++ *
++ * The tablet keeps Android on its eMMC; iPadOS lives on the microSD card in
++ * sdhc2 (Qualcomm sdhci-msm, SDHCI 3.0). LK leaves that slot dead, so this
++ * driver does what t290/shim/diag.c proved on the hardware:
++ *   - card rails pm8953 L11 (card) and L12 (pads) belong to the RPM: reopen
++ *     the rpm_requests SMD channel in SMEM and ask for 2.95 V on both
++ *   - sdc2 pads: pull-ups on CMD/DAT, 16 mA clock
++ *   - GCC SDCC2 AHB/apps clocks, 400 kHz from XO for identification, then
++ *     25 MHz (GPLL0) and 50 MHz high speed when the card switches
++ *   - SDHCI mode, power-control handshake of the Qualcomm core, card init,
++ *     4-bit bus
++ * Data moves with ADMA2 through a 1 MiB bounce buffer (CMD17/18/24/25, auto
++ * CMD12), polled like the UFS and virtio drivers; the controller is not
++ * cache coherent. The whole card is the volume (no partition table) unless
++ * boot-arg sdoff=<sector> says where it starts. Writes need sdrw=1.
++ * Root with rd=sdroot0.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++#include <machine/atomic.h>
++
++int sweet_sdhc_rootdev(dev_t *dev);
++
++#if defined(SWEET_T290)
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
++extern void clean_dcache64(addr64_t addr, unsigned count, int phys);
++
++/* ---- hardware (live FDT of SM-T290, board P81080BA5) ---- */
++#define SDC2_PHYS               0x07864000UL    /* core_mem; SDHCI at +0x900 */
++#define SDC2_HC                 0x900
++#define GCC_SDCC2_PHYS          0x01843000UL    /* GCC 0x1800000 + 0x43000 */
++#define TLMM_SDC2_PHYS          0x01109000UL
++#define SMEM_PHYS               0x86300000UL
++#define SMEM_SIZE               0x100000UL
++#define RPM_MSG_PHYS            0x00060000UL    /* smem aux-mem1 */
++#define RPM_MSG_SIZE            0x8000UL
++#define APCS_IPC_PHYS           0x0b011000UL    /* + 8: IPC interrupt */
++
++/* GCC SDCC2 (offsets in the 0x43000 page) */
++#define GCC_CMD                 0x004
++#define GCC_CFG                 0x008
++#define GCC_M                   0x00c
++#define GCC_N                   0x010
++#define GCC_D                   0x014
++#define GCC_APPS_CBCR           0x018
++#define GCC_AHB_CBCR            0x01c
++#define CBCR_CLK_OFF            (1U << 31)
++
++/* SDHCI */
++#define HC_ADMA_ARG2            0x00
++#define HC_BLK                  0x04    /* block size | count << 16 */
++#define HC_ARG                  0x08
++#define HC_XFER_CMD             0x0c    /* transfer mode | command << 16 */
++#define HC_RESP                 0x10
++#define HC_DATA                 0x20
++#define HC_PSTATE               0x24
++#define HC_CTL                  0x28    /* host ctl | power << 8 */
++#define HC_CLK                  0x2c    /* clock | timeout << 16 | reset << 24 */
++#define HC_INT                  0x30    /* normal | error << 16, write 1 to clear */
++#define HC_INT_EN               0x34
++#define HC_ADMA_ADDR            0x58
++#define HC_ADMA_ADDR_HI         0x5c
++
++#define CTL_4BIT                0x02
++#define CTL_HISPD               0x04
++#define CTL_ADMA2_32            0x10
++
++#define INT_CMD                 0x0001
++#define INT_XFER                0x0002
++#define INT_ERR                 0x8000
++
++#define XFER_DMA                0x01
++#define XFER_BLKCNT             0x02
++#define XFER_ACMD12             0x04
++#define XFER_READ               0x10
++#define XFER_MULTI              0x20
++
++#define RSP_NONE                0x00
++#define RSP_136                 0x09
++#define RSP_48                  0x1a
++#define RSP_48B                 0x1b
++#define RSP_48_NOCRC            0x02
++#define CMD_DATA                0x20
++
++/* Qualcomm core */
++#define CORE_HC_MODE            0x78
++#define CORE_PWR_ST             0xdc
++#define CORE_PWR_CLR            0xe4
++#define CORE_PWR_CTL            0xe8
++
++/* SMEM / SMD / RPM */
++#define SMEM_TOC                208     /* after proc_comm[4], version[32], heap_info */
++#define SMEM_ALLOC_TBL          13
++#define SMEM_SMD_BASE           14
++#define SMEM_SMD_FIFO           338
++#define HC_STATE                0       /* smd_half_channel_word_access */
++#define HC_DSR                  1
++#define HC_CTS                  2
++#define HC_CD                   3
++#define HC_FHEAD                5
++#define HC_FTAIL                6
++#define HC_FSTATE               7
++#define HC_FBLOCK               8
++#define HC_TAIL                 9
++#define HC_HEAD                 10
++#define SS_OPENING              1
++#define SS_OPENED               2
++#define RPM_LDOA                0x616f646c      /* "ldoa" */
++#define RPM_KEY_SWEN            0x6e657773      /* "swen" */
++#define RPM_KEY_UV              0x00007675      /* "uv" */
++
++#define SECTOR                  512u
++#define BOUNCE_SIZE             (1u << 20)
++#define ADMA_CHUNK              0x8000u
++#define DMA_ADMA                0x0000          /* descriptor table */
++#define DMA_BOUNCE              0x1000
++#define DMA_SIZE                (DMA_BOUNCE + BOUNCE_SIZE)
++
++static struct {
++	vm_offset_t sdc, gcc, tlmm, smem, rpm_msg, ipc;
++	vm_offset_t dma;
++	uint64_t dma_pa;
++	uintptr_t smd_tx, smd_rx, fifo_tx, fifo_rx;
++	uint32_t fifo_sz, rpm_msg_id;
++	uint32_t rca;
++	uint32_t resp[4];
++	uint64_t nsectors;      /* of the volume */
++	uint64_t first;         /* sdoff */
++	uint32_t secsize;
++	uint32_t mhz;
++	bool writable;
++	bool ready;
++	int bmajor, cmajor;
++	dev_t bdev;
++} sd;
++
++static LCK_GRP_DECLARE(sweet_sdhc_grp, "sweet_sdhc");
++static LCK_MTX_DECLARE(sweet_sdhc_lock, &sweet_sdhc_grp);
++
++static inline uint32_t rd32(vm_offset_t a) { return *(volatile uint32_t *)a; }
++static inline void wr32(vm_offset_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
++static uint32_t hc(uint32_t off) { return rd32(sd.sdc + SDC2_HC + off); }
++static void hc_wr(uint32_t off, uint32_t v) { wr32(sd.sdc + SDC2_HC + off, v); }
++static uint32_t core(uint32_t off) { return rd32(sd.sdc + off); }
++static void core_wr(uint32_t off, uint32_t v) { wr32(sd.sdc + off, v); }
++
++static uint64_t
++deadline_us(uint64_t us)
++{
++	uint64_t t;
++	nanoseconds_to_absolutetime(us * NSEC_PER_USEC, &t);
++	return mach_absolute_time() + t;
++}
++
++static void
++spin_us(uint64_t us)
++{
++	uint64_t end = deadline_us(us);
++	while (mach_absolute_time() < end) {
++	}
++}
++
++/* ---- RPM over SMD (as in Qualcomm LK rpm-smd.c / Linux smd.c) ---- */
++
++static uintptr_t
++smem_item(uint32_t id, uint32_t *size)
++{
++	vm_offset_t e = sd.smem + SMEM_TOC + id * 16;
++	if (!rd32(e)) {
++		return 0;
++	}
++	if (size) {
++		*size = rd32(e + 8);
++	}
++	uint32_t base = rd32(e + 12) & ~3U, off = rd32(e + 4);
++	if (!base) {
++		return sd.smem + off;
++	}
++	if (base == RPM_MSG_PHYS && off < RPM_MSG_SIZE) {
++		return sd.rpm_msg + off;
++	}
++	printf("SWEET SDHC: smem item %u in unknown area 0x%x\n", id, base);
++	return 0;
++}
++
++static uint32_t hch(uintptr_t h, int w) { return rd32(h + 4 * w); }
++static void hch_wr(uintptr_t h, int w, uint32_t v) { wr32(h + 4 * w, v); }
++
++static void
++rpm_kick(void)
++{
++	__builtin_arm_dsb(DSB_SY);
++	wr32(sd.ipc + 8, 1);
++}
++
++static int
++smd_open_rpm(void)
++{
++	uint32_t tsize = 0;
++	uintptr_t tbl = smem_item(SMEM_ALLOC_TBL, &tsize);
++	if (!tbl) {
++		printf("SWEET SDHC: no SMD allocation table\n");
++		return ENXIO;
++	}
++	for (uint32_t i = 0; i + 32 <= tsize && i < 64 * 32; i += 32) {
++		if (strncmp((const char *)(tbl + i), "rpm_requests", 20) != 0 ||
++		    (rd32(tbl + i + 24) & 0xff) != 0x0f) {
++			continue;       /* name or edge (APPS<->RPM) differs */
++		}
++		uint32_t cid = rd32(tbl + i + 20), fsz = 0;
++		uintptr_t sh = smem_item(SMEM_SMD_BASE + cid, NULL);
++		uintptr_t fifo = smem_item(SMEM_SMD_FIFO + cid, &fsz);
++		if (!sh || !fifo || fsz < 128) {
++			break;
++		}
++		sd.smd_tx = sh;
++		sd.smd_rx = sh + 11 * 4;
++		sd.fifo_sz = fsz / 2;
++		sd.fifo_tx = fifo;
++		sd.fifo_rx = fifo + sd.fifo_sz;
++		goto found;
++	}
++	printf("SWEET SDHC: rpm_requests channel not found\n");
++	return ENXIO;
++
++found:
++	if (hch(sd.smd_tx, HC_STATE) == SS_OPENED && hch(sd.smd_rx, HC_STATE) == SS_OPENED) {
++		return 0;
++	}
++	/* Linux smd_state_change(): reopening restarts both FIFOs at 0. */
++	hch_wr(sd.smd_tx, HC_HEAD, 0);
++	hch_wr(sd.smd_rx, HC_TAIL, 0);
++	hch_wr(sd.smd_tx, HC_FBLOCK, 0);
++	hch_wr(sd.smd_tx, HC_STATE, SS_OPENING);
++	hch_wr(sd.smd_tx, HC_DSR, 0);
++	hch_wr(sd.smd_tx, HC_CTS, 0);
++	hch_wr(sd.smd_tx, HC_CD, 0);
++	hch_wr(sd.smd_tx, HC_FSTATE, 1);
++	rpm_kick();
++	uint64_t end = deadline_us(1000000);
++	uint32_t r;
++	while ((r = hch(sd.smd_rx, HC_STATE)) != SS_OPENING && r != SS_OPENED) {
++		if (mach_absolute_time() > end) {
++			printf("SWEET SDHC: RPM did not answer the SMD open (state %u)\n", r);
++			return ETIMEDOUT;
++		}
++	}
++	hch_wr(sd.smd_tx, HC_STATE, SS_OPENED);
++	hch_wr(sd.smd_tx, HC_DSR, 1);
++	hch_wr(sd.smd_tx, HC_CTS, 1);
++	hch_wr(sd.smd_tx, HC_CD, 1);
++	hch_wr(sd.smd_tx, HC_FSTATE, 1);
++	rpm_kick();
++	end = deadline_us(1000000);
++	while (hch(sd.smd_rx, HC_STATE) != SS_OPENED) {
++		if (mach_absolute_time() > end) {
++			return ETIMEDOUT;
++		}
++	}
++	return 0;
++}
++
++static void
++smd_put(uint32_t *head, uint32_t w)
++{
++	wr32(sd.fifo_tx + *head, w);
++	*head = (*head + 4) % sd.fifo_sz;
++}
++
++/* One "req" to the active set; returns the size of RPM's reply (0: none). */
++static uint32_t
++rpm_req(uint32_t rtype, uint32_t rid, const uint32_t *kv, int nkv)
++{
++	uint32_t data_len = nkv * 12;
++	uint32_t req_len = 5 * 4 + data_len;
++	uint32_t pkt_len = 2 * 4 + req_len;
++	uint32_t head = hch(sd.smd_tx, HC_HEAD);
++	uint32_t room = (hch(sd.smd_tx, HC_TAIL) + sd.fifo_sz - head - 4) % sd.fifo_sz;
++	if (room < pkt_len + 20) {
++		return 0;
++	}
++	uint32_t rx_before = hch(sd.smd_rx, HC_HEAD);
++
++	smd_put(&head, pkt_len);                /* SMD packet header */
++	for (int i = 0; i < 4; i++) {
++		smd_put(&head, 0);
++	}
++	smd_put(&head, 0x00716572);             /* "req" */
++	smd_put(&head, req_len);
++	smd_put(&head, ++sd.rpm_msg_id);
++	smd_put(&head, 0);                      /* active set */
++	smd_put(&head, rtype);
++	smd_put(&head, rid);
++	smd_put(&head, data_len);
++	for (int i = 0; i < nkv; i++) {
++		smd_put(&head, kv[2 * i]);
++		smd_put(&head, 4);
++		smd_put(&head, kv[2 * i + 1]);
++	}
++	__builtin_arm_dsb(DSB_SY);
++	hch_wr(sd.smd_tx, HC_HEAD, head);
++	hch_wr(sd.smd_tx, HC_FHEAD, 1);
++	rpm_kick();
++
++	uint64_t end = deadline_us(200000);
++	while (hch(sd.smd_rx, HC_HEAD) == rx_before && mach_absolute_time() < end) {
++	}
++	uint32_t rx_head = hch(sd.smd_rx, HC_HEAD);
++	uint32_t got = (rx_head + sd.fifo_sz - rx_before) % sd.fifo_sz;
++	if (got) {
++		hch_wr(sd.smd_rx, HC_TAIL, rx_head);    /* consume the reply */
++		hch_wr(sd.smd_rx, HC_FTAIL, 1);
++		rpm_kick();
++	}
++	return got;
++}
++
++static int
++sd_rails_on(void)
++{
++	static const uint32_t on_2v95[] = { RPM_KEY_UV, 2950000, RPM_KEY_SWEN, 1 };
++	int error = smd_open_rpm();
++	if (error) {
++		return error;
++	}
++	uint32_t a12 = rpm_req(RPM_LDOA, 12, on_2v95, 2);
++	uint32_t a11 = rpm_req(RPM_LDOA, 11, on_2v95, 2);
++	if (!a12 || !a11) {
++		printf("SWEET SDHC: RPM did not acknowledge L12/L11 (%u/%u)\n", a12, a11);
++		return EIO;
++	}
++	spin_us(50000);
++	return 0;
++}
++
++/* ---- clocks, controller ---- */
++
++static int
++gcc_branch_on(uint32_t cbcr)
++{
++	wr32(sd.gcc + cbcr, rd32(sd.gcc + cbcr) | 1);
++	uint64_t end = deadline_us(100000);
++	while (rd32(sd.gcc + cbcr) & CBCR_CLK_OFF) {
++		if (mach_absolute_time() > end) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
++/* SDCC2 apps RCG: source (0 XO, 1 GPLL0 800 MHz), pre-divider, M/N (0 = bypass). */
++static void
++sd_set_rcg(uint32_t src, uint32_t prediv, uint32_t m, uint32_t n)
++{
++	uint32_t mode = 0;
++	if (n) {
++		wr32(sd.gcc + GCC_M, m);
++		wr32(sd.gcc + GCC_N, ~(n - m) & 0xff);
++		wr32(sd.gcc + GCC_D, ~n & 0xff);
++		mode = 2;       /* dual edge */
++	}
++	wr32(sd.gcc + GCC_CFG, (2 * prediv - 1) | src << 8 | mode << 12);
++	wr32(sd.gcc + GCC_CMD, rd32(sd.gcc + GCC_CMD) | 1);
++	uint64_t end = deadline_us(100000);
++	while ((rd32(sd.gcc + GCC_CMD) & 1) && mach_absolute_time() < end) {
++	}
++}
++
++static void
++sd_clock(uint32_t src, uint32_t prediv, uint32_t m, uint32_t n)
++{
++	hc_wr(HC_CLK, hc(HC_CLK) & ~0x0004U);   /* SD clock off while switching */
++	sd_set_rcg(src, prediv, m, n);
++	hc_wr(HC_CLK, hc(HC_CLK) | 0x0004);
++}
++
++static uint32_t
++sd_pwr_ack(uint64_t us)
++{
++	uint64_t end = deadline_us(us);
++	do {
++		uint32_t st = core(CORE_PWR_ST);
++		if (st) {
++			uint32_t ctl = 0;
++			core_wr(CORE_PWR_CLR, st);
++			if (st & 3) {
++				ctl |= 1;       /* bus on/off: success */
++			}
++			if (st & 0xc) {
++				ctl |= 4;       /* io low/high: success */
++			}
++			core_wr(CORE_PWR_CTL, ctl);
++			return st;
++		}
++	} while (mach_absolute_time() < end);
++	return 0;
++}
++
++static int
++sd_reset(uint32_t bits)
++{
++	hc_wr(HC_CLK, hc(HC_CLK) | bits << 24);
++	uint64_t end = deadline_us(100000);
++	while (hc(HC_CLK) & bits << 24) {
++		if (mach_absolute_time() > end) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
++/* Wait for normal-interrupt bits or an error. Returns the status (0: timeout). */
++static uint32_t
++sd_wait(uint32_t bits, uint64_t us)
++{
++	uint64_t end = deadline_us(us);
++	do {
++		uint32_t st = hc(HC_INT);
++		if (st & (bits | INT_ERR)) {
++			hc_wr(HC_INT, st & (bits | 0xffff0000U | INT_ERR));
++			return st;
++		}
++	} while (mach_absolute_time() < end);
++	return 0;
++}
++
++static int
++sd_idle(uint32_t mask, uint64_t us)
++{
++	uint64_t end = deadline_us(us);
++	while (hc(HC_PSTATE) & mask) {
++		if (mach_absolute_time() > end) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
++/* Command without data. 0, or EIO/ETIMEDOUT (error bits printed). */
++static int
++sd_cmd(uint32_t idx, uint32_t arg, uint32_t rsp)
++{
++	if (!sd_idle(rsp == RSP_48B ? 3 : 1, 2000000)) {
++		return ETIMEDOUT;
++	}
++	hc_wr(HC_INT, 0xffffffff);
++	hc_wr(HC_ARG, arg);
++	hc_wr(HC_XFER_CMD, (idx << 8 | rsp) << 16);
++	uint32_t st = sd_wait(INT_CMD, 200000);
++	if (!(st & INT_CMD) || (st & INT_ERR)) {
++		sd_reset(2);
++		return st ? EIO : ETIMEDOUT;
++	}
++	for (int k = 0; k < 4; k++) {
++		sd.resp[k] = hc(HC_RESP + 4 * k);
++	}
++	if (rsp == RSP_48B) {
++		sd_wait(INT_XFER, 1000000);     /* busy end */
++	}
++	return 0;
++}
++
++static int
++sd_acmd(uint32_t idx, uint32_t arg, uint32_t rsp)
++{
++	int error = sd_cmd(55, sd.rca << 16, RSP_48);
++	return error ? error : sd_cmd(idx, arg, rsp);
++}
++
++/*
++ * Data command through ADMA2 and the bounce buffer: nblk blocks of blksz
++ * bytes (blksz * nblk <= BOUNCE_SIZE). CMD18/25 get auto CMD12.
++ */
++static int
++sd_xfer(uint32_t idx, uint32_t arg, uint32_t blksz, uint32_t nblk, bool write)
++{
++	uint32_t len = blksz * nblk;
++	volatile uint32_t *desc = (volatile uint32_t *)(sd.dma + DMA_ADMA);
++	uint32_t n = 0;
++	for (uint32_t off = 0; off < len; off += ADMA_CHUNK, n++) {
++		uint32_t chunk = MIN(ADMA_CHUNK, len - off);
++		uint32_t attr = 0x21 | (off + chunk >= len ? 0x2 : 0);  /* valid, tran, end */
++		desc[2 * n] = attr | chunk << 16;
++		desc[2 * n + 1] = (uint32_t)(sd.dma_pa + DMA_BOUNCE + off);
++	}
++	clean_dcache64((addr64_t)(sd.dma_pa + DMA_ADMA), n * 8, TRUE);
++	if (write) {
++		clean_dcache64((addr64_t)(sd.dma_pa + DMA_BOUNCE), len, TRUE);
++	} else {
++		flush_dcache64((addr64_t)(sd.dma_pa + DMA_BOUNCE), len, TRUE);
++	}
++
++	if (!sd_idle(3, 2000000)) {             /* CMD and DAT (write busy) */
++		return ETIMEDOUT;
++	}
++	hc_wr(HC_INT, 0xffffffff);
++	hc_wr(HC_ADMA_ADDR, (uint32_t)(sd.dma_pa + DMA_ADMA));
++	hc_wr(HC_ADMA_ADDR_HI, 0);
++	hc_wr(HC_BLK, blksz | nblk << 16);
++	hc_wr(HC_ARG, arg);
++	uint32_t mode = XFER_DMA | XFER_BLKCNT | (write ? 0 : XFER_READ);
++	if (nblk > 1) {
++		mode |= XFER_MULTI | XFER_ACMD12;
++	}
++	hc_wr(HC_XFER_CMD, mode | (idx << 8 | CMD_DATA | RSP_48) << 16);
++
++	uint32_t st = sd_wait(INT_CMD, 200000);
++	if ((st & INT_CMD) && !(st & INT_ERR)) {
++		st = sd_wait(INT_XFER, 5000000 + (uint64_t)len * 4);
++	}
++	if (!(st & INT_XFER) || (st & INT_ERR)) {
++		printf("SWEET SDHC: CMD%u arg 0x%x x%u failed: int 0x%x pstate 0x%x\n",
++		    idx, arg, nblk, st, hc(HC_PSTATE));
++		sd_reset(2 | 4);
++		return st ? EIO : ETIMEDOUT;
++	}
++	if (!write) {
++		flush_dcache64((addr64_t)(sd.dma_pa + DMA_BOUNCE), len, TRUE);
++	}
++	return 0;
++}
++
++/* Read or write whole sectors (absolute card LBA) through the bounce buffer. */
++static int
++sd_rw(uint64_t lba, uint32_t nsec, bool write)
++{
++	int error = 0;
++	for (int attempt = 0; attempt < 2; attempt++) {
++		if (nsec == 1) {
++			error = sd_xfer(write ? 24 : 17, (uint32_t)lba, SECTOR, 1, write);
++		} else {
++			error = sd_xfer(write ? 25 : 18, (uint32_t)lba, SECTOR, nsec, write);
++		}
++		if (!error) {
++			break;
++		}
++	}
++	return error;
++}
++
++/* ---- card bring-up ---- */
++
++static int
++sd_card_init(void)
++{
++	/* pads: clk 16 mA, cmd/data pull-up 10 mA (Linux sdc2 "active") */
++	wr32(sd.tlmm, 3 << 11 | 3 << 9 | 7 << 6 | 4 << 3 | 4);
++
++	if (!gcc_branch_on(GCC_AHB_CBCR)) {
++		printf("SWEET SDHC: SDCC2 AHB clock stays off\n");
++		return EIO;
++	}
++	sd_set_rcg(0, 12, 1, 4);                /* XO 19.2 / 12, 1/4 = 400 kHz */
++	if (!gcc_branch_on(GCC_APPS_CBCR)) {
++		printf("SWEET SDHC: SDCC2 apps clock stays off\n");
++		return EIO;
++	}
++
++	core_wr(CORE_HC_MODE, 1 | 1U << 13);    /* HC_MODE_EN, FF_CLK_SW_RST_DIS */
++	sd_reset(1);
++	sd_pwr_ack(20000);
++	hc_wr(HC_INT_EN, 0xffffffff);
++	hc_wr(HC_CLK, 0x0e << 16 | 0x0001);     /* internal clock, base / 1 */
++	uint64_t end = deadline_us(100000);
++	while (!(hc(HC_CLK) & 2) && mach_absolute_time() < end) {
++	}
++	hc_wr(HC_CLK, hc(HC_CLK) | 0x0004);
++	hc_wr(HC_CTL, (hc(HC_CTL) & ~0xff00U) | 0x0f00);        /* 3.3 V, bus power */
++	sd_pwr_ack(50000);
++	spin_us(20000);
++
++	sd_cmd(0, 0, RSP_NONE);
++	spin_us(2000);
++	bool v2 = sd_cmd(8, 0x1aa, RSP_48) == 0 && (sd.resp[0] & 0xfff) == 0x1aa;
++	uint32_t ocr = 0;
++	end = deadline_us(2000000);
++	do {
++		sd.rca = 0;
++		if (sd_acmd(41, v2 ? 0x40ff8000 : 0x00ff8000, RSP_48_NOCRC)) {
++			printf("SWEET SDHC: no answer to ACMD41 (pstate 0x%x)\n", hc(HC_PSTATE));
++			return ENXIO;
++		}
++		ocr = sd.resp[0];
++		if (ocr & 0x80000000) {
++			break;
++		}
++		spin_us(10000);
++	} while (mach_absolute_time() < end);
++	if (!(ocr & 0x80000000) || !(ocr & 0x40000000)) {
++		printf("SWEET SDHC: card not ready or not SDHC/SDXC (OCR 0x%x)\n", ocr);
++		return ENXIO;
++	}
++	if (sd_cmd(2, 0, RSP_136)) {
++		return EIO;
++	}
++	uint32_t cid[4] = { sd.resp[0], sd.resp[1], sd.resp[2], sd.resp[3] };
++	if (sd_cmd(3, 0, RSP_48)) {
++		return EIO;
++	}
++	sd.rca = sd.resp[0] >> 16;
++	if (sd_cmd(9, sd.rca << 16, RSP_136)) {
++		return EIO;
++	}
++	uint64_t card_sectors = ((uint64_t)((sd.resp[1] >> 8) & 0x3fffff) + 1) * 1024;
++	if (sd_cmd(7, sd.rca << 16, RSP_48B)) {
++		return EIO;
++	}
++	if (sd_acmd(6, 2, RSP_48) == 0) {
++		hc_wr(HC_CTL, hc(HC_CTL) | CTL_4BIT);
++	}
++	hc_wr(HC_CTL, hc(HC_CTL) | CTL_ADMA2_32);
++	sd_clock(1, 16, 1, 2);                  /* GPLL0 800 / 16 = 50, 1/2 = 25 MHz */
++	sd.mhz = 25;
++
++	char name[6] = { (char)(cid[2] >> 24), (char)(cid[2] >> 16), (char)(cid[2] >> 8),
++		         (char)cid[2], (char)(cid[1] >> 24), 0 };
++	printf("SWEET SDHC: card mid 0x%x \"%s\", %llu MiB, RCA 0x%x, 4-bit\n",
++	    (cid[3] >> 16) & 0xff, name, card_sectors / 2048, sd.rca);
++
++	/* High speed: CMD6 mode 1, group 1 function 1; keep 25 MHz if anything is off. */
++	uint32_t ref[4];
++	if (sd_rw(0, 1, false) == 0) {
++		memcpy(ref, (const void *)(sd.dma + DMA_BOUNCE), sizeof(ref));
++		uint32_t want = 1;              /* sdhs=0 keeps 25 MHz */
++		PE_parse_boot_argn("sdhs", &want, sizeof(want));
++		if (want && sd_xfer(6, 0x80fffff1, 64, 1, false) == 0 &&
++		    (((const volatile uint8_t *)(sd.dma + DMA_BOUNCE))[16] & 0xf) == 1) {
++			hc_wr(HC_CTL, hc(HC_CTL) | CTL_HISPD);
++			sd_clock(1, 16, 0, 0);          /* 50 MHz */
++			if (sd_rw(0, 1, false) == 0 &&
++			    memcmp(ref, (const void *)(sd.dma + DMA_BOUNCE), sizeof(ref)) == 0) {
++				sd.mhz = 50;
++			} else {
++				hc_wr(HC_CTL, hc(HC_CTL) & ~CTL_HISPD);
++				sd_clock(1, 16, 1, 2);
++				printf("SWEET SDHC: high speed did not read back, staying at 25 MHz\n");
++			}
++		}
++	}
++
++	uint32_t first = 0;
++	PE_parse_boot_argn("sdoff", &first, sizeof(first));
++	if (first >= card_sectors) {
++		first = 0;
++	}
++	sd.first = first;
++	sd.nsectors = card_sectors - first;
++	return 0;
++}
++
++/* ---- block device ---- */
++
++static int
++sweet_sdhc_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!sd.ready) {
++		return ENXIO;
++	}
++	return ((flags & FWRITE) && !sd.writable) ? EROFS : 0;
++}
++
++static int
++sweet_sdhc_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++sweet_sdhc_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * sd.secsize;
++	uint32_t count = buf_count(bp);
++	uint64_t disk_bytes = sd.nsectors * SECTOR;
++	bool rd = buf_flags(bp) & B_READ;
++	char *bounce = (char *)(sd.dma + DMA_BOUNCE);
++
++	buf_setresid(bp, count);
++	if (!rd && !sd.writable) {
++		error = EROFS;
++		goto done;
++	}
++	if (off > disk_bytes || count > disk_bytes - off) {
++		error = EINVAL;
++		goto done;
++	}
++	if (count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&sweet_sdhc_lock);
++	for (uint32_t done = 0; done < count;) {
++		uint64_t pos = off + done;
++		uint64_t lba = sd.first + pos / SECTOR;
++		uint32_t skip = (uint32_t)(pos % SECTOR);
++		uint32_t want = MIN(count - done, BOUNCE_SIZE - skip);
++		uint32_t bytes = (skip + want + SECTOR - 1) & ~(SECTOR - 1);
++		if (rd) {
++			error = sd_rw(lba, bytes / SECTOR, false);
++			if (!error) {
++				memcpy(vaddr + done, bounce + skip, want);
++			}
++		} else {
++			/* Partial sectors at either end: read, merge, write back. */
++			if (skip || (want % SECTOR)) {
++				error = sd_rw(lba, bytes / SECTOR, false);
++			}
++			if (!error) {
++				memcpy(bounce + skip, vaddr + done, want);
++				error = sd_rw(lba, bytes / SECTOR, true);
++			}
++		}
++		if (error) {
++			break;
++		}
++		done += want;
++		buf_setresid(bp, count - done);
++	}
++	lck_mtx_unlock(&sweet_sdhc_lock);
++	buf_unmap(bp);
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++sweet_sdhc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*f = sd.secsize;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		if (*f < DEV_BSIZE || *f > PAGE_SIZE || (*f & (*f - 1))) {
++			return EINVAL;
++		}
++		sd.secsize = *f;
++		return 0;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = SECTOR;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*o = sd.nsectors * SECTOR / sd.secsize;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = sd.writable;
++		return 0;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE:
++		/* SD cards have no volatile write cache to flush here */
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = BOUNCE_SIZE / sd.secsize;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = sd.writable ? BOUNCE_SIZE / sd.secsize : 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++sweet_sdhc_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_sdhc_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++sweet_sdhc_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_sdhc_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++sweet_sdhc_psize(__unused dev_t dev)
++{
++	return sd.ready ? (int)MIN(sd.nsectors * SECTOR / sd.secsize, INT_MAX) : -1;
++}
++
++static int
++sweet_sdhc_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(sweet_sdhc_strategy, NULL, dev, B_READ, minphys, uio, (int)sd.secsize);
++}
++
++static int
++sweet_sdhc_write(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	if (!sd.writable) {
++		return EROFS;
++	}
++	return physio(sweet_sdhc_strategy, NULL, dev, B_WRITE, minphys, uio, (int)sd.secsize);
++}
++
++static const struct bdevsw sweet_sdhc_bdevsw = {
++	.d_open     = sweet_sdhc_open,
++	.d_close    = sweet_sdhc_close,
++	.d_strategy = sweet_sdhc_strategy,
++	.d_ioctl    = sweet_sdhc_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = sweet_sdhc_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw sweet_sdhc_cdevsw = {
++	.d_open       = sweet_sdhc_open,
++	.d_close      = sweet_sdhc_close,
++	.d_read       = sweet_sdhc_read,
++	.d_write      = sweet_sdhc_write,
++	.d_ioctl      = sweet_sdhc_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++sweet_sdhc_init(void)
++{
++	uint32_t rw = 0;
++	PE_parse_boot_argn("sdrw", &rw, sizeof(rw));
++
++	sd.sdc = ml_io_map(SDC2_PHYS, PAGE_SIZE);
++	sd.gcc = ml_io_map(GCC_SDCC2_PHYS, PAGE_SIZE);
++	sd.tlmm = ml_io_map(TLMM_SDC2_PHYS, PAGE_SIZE);
++	sd.smem = ml_io_map(SMEM_PHYS, SMEM_SIZE);
++	sd.rpm_msg = ml_io_map(RPM_MSG_PHYS, RPM_MSG_SIZE);
++	sd.ipc = ml_io_map(APCS_IPC_PHYS, PAGE_SIZE);
++	if (kmem_alloc_contig(kernel_map, &sd.dma, DMA_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET SDHC: no contiguous DMA memory\n");
++		return ENOMEM;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)sd.dma);
++	if (!pn) {
++		return ENOMEM;
++	}
++	sd.dma_pa = ptoa_64(pn);
++	if (sd.dma_pa + DMA_SIZE > 0x100000000ULL) {
++		printf("SWEET SDHC: DMA buffer above 4 GiB\n");
++		return ENOMEM;
++	}
++	sd.secsize = DEV_BSIZE;
++
++	int error = sd_rails_on();
++	if (!error) {
++		error = sd_card_init();
++	}
++	if (error) {
++		printf("SWEET SDHC: no microSD card: %d\n", error);
++		return error;
++	}
++
++	sd.bmajor = bdevsw_add(-1, &sweet_sdhc_bdevsw);
++	if (sd.bmajor < 0) {
++		return ENXIO;
++	}
++	sd.cmajor = cdevsw_add_with_bdev(-1, &sweet_sdhc_cdevsw, sd.bmajor);
++	if (sd.cmajor < 0) {
++		return ENXIO;
++	}
++	sd.bdev = makedev(sd.bmajor, 0);
++	devfs_make_node(sd.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdroot0");
++	devfs_make_node(makedev(sd.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdroot0");
++	sd.writable = (rw != 0);
++	sd.ready = true;
++
++	/* rough read speed, so the boot log shows what the card delivers */
++	uint64_t t0 = mach_absolute_time(), ns;
++	int e = sd_rw(sd.first, BOUNCE_SIZE / SECTOR, false);
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	printf("SWEET SDHC: sdroot0 %s, %llu MiB from sector %llu, %u MHz, 1 MiB read in %llu us%s\n",
++	    sd.writable ? "read-write" : "read-only", sd.nsectors / 2048, sd.first, sd.mhz,
++	    ns / 1000, e ? " (FAILED)" : "");
++	return 0;
++}
++
++int
++sweet_sdhc_rootdev(dev_t *dev)
++{
++	if (!sd.ready) {
++		int error = sweet_sdhc_init();
++		if (error) {
++			return error;
++		}
++	}
++	*dev = sd.bdev;
++	return 0;
++}
++#else /* !SWEET_T290 */
++int
++sweet_sdhc_rootdev(__unused dev_t *dev)
++{
++	return ENODEV;
++}
++#endif /* SWEET_T290 */
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index ec5452d..a98a260 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -797,6 +797,21 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 		*oflags = 0;
+ 		goto iofrootx;
+ 	}
++//
++//	SWEET_BOARD=t290: root on the microSD card (bsd/dev/sweet_sdhc.c)
++//
++	if (strcmp(rdBootVar, "sdroot0") == 0) {
++		extern int sweet_sdhc_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int sdhc_error = sweet_sdhc_rootdev(root);
++		if (sdhc_error) {
++			panic("IOFindBSDRoot: SWEET microSD root %s unavailable: %d", rdBootVar, sdhc_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
+ #endif
+ 
+ //
