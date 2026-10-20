@@ -1,0 +1,49 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 25ab0d7..da29e2c 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -93,9 +93,14 @@ SweetCPU::start(IOService *provider)
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
++#if defined(SWEET_T290)
++	/* SDM429: one cluster, MPIDR 0x100-0x103 (Aff1 = 1); QEMU virt: 0-3 */
++	if ((cpu->phys_id & ~0x103U) != 0 || topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++#else
+ 	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
+ 	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++#endif
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}
+@@ -164,10 +169,18 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 		}
+ 		IOSleep(1);
+ 	}
+-	/* The supplied ADT has cpu0 as the boot CPU and ascending A55 nodes. */
++	/* The supplied ADT has cpu0 as the boot CPU and ascending core nodes. */
++#if defined(SWEET_T290)
++	/* the tablet boots on MPIDR 0x100, QEMU on 0: whatever cpu0's reg says */
++	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != topology->cpus[0].phys_id) {
++		panic("SWEET CPU: expected boot CPU = ADT cpu0 (mpidr 0x%x), got logical %u mpidr 0x%x",
++		    topology->cpus[0].phys_id, topology->boot_cpu->cpu_id, topology->boot_cpu->phys_id);
++	}
++#else
+ 	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0) {
+ 		panic("SWEET CPU: expected boot MPIDR 0 and logical CPU 0");
+ 	}
++#endif
+ 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
+ 		SweetCPU *cpu = __atomic_load_n(&sweet_cpus[i], __ATOMIC_ACQUIRE);
+ 		kern_return_t kr = processor_start(cpu->machProcessor);
+@@ -260,7 +273,8 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ {
+ 	const ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[getCPUNumber()];
+ 	/* cpu_start() passes NULL,NULL: x20/x21 are set by LowResetVectorBase. */
+-	if (start_paddr != 0 || arg_paddr != 0 || cpu->phys_id == 0 ||
++	if (start_paddr != 0 || arg_paddr != 0 ||
++	    cpu->phys_id == ml_get_topology_info()->boot_cpu->phys_id ||
+ 	    __atomic_load_n(&initialized, __ATOMIC_ACQUIRE) != 0) {
+ 		panic("SWEET CPU: cpu=%u unsupported restart", getCPUNumber());
+ 	}
