@@ -11,8 +11,8 @@ cd "$(dirname "$0")/../.."
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 python3 t290/tools/mkadt_t290.py "$W/t290.adt"
-# sweet's phone boot-args (README) with the microSD root; CPUS=N (default 1)
-# over SMC is proven on the tablet.
+# sweet's phone boot-args (README) with the microSD root. CPUS=N cores
+# (default 1; secondaries start with PSCI CPU_ON over SMC).
 ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprogress"
 ARGS="$ARGS rd=sdroot0 sdrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1"
 ARGS="$ARGS wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=10 msgbuf=8388608"
