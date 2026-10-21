@@ -114,9 +114,9 @@ static uint32_t plog_init(void)
 #define STEP(s) do { stage = s; plog_str(">> " s "\n"); } while (0)
 
 /* ---- console: format follows whatever LK programmed into the MDP ---- */
-#define SCALE		2
-#define CH_W		(8 * SCALE)
-#define CH_H		(16 * SCALE)
+static int cscale = 2;		/* font scale: 2 console, 3 menu buttons, 1 log viewer */
+#define CH_W		(8 * cscale)
+#define CH_H		(16 * cscale)
 #define MARGIN		16
 #define LABEL_COLS	8
 
@@ -181,9 +181,9 @@ static void draw_glyph(int x0, int y0, char ch, uint32_t fg)
 	for (int gy = 0; gy < 16; gy++)
 		for (int gx = 0; gx < 8; gx++) {
 			uint32_t c = (g[gy] & (0x80 >> gx)) ? fg : bg;
-			for (int sy = 0; sy < SCALE; sy++)
-				for (int sx = 0; sx < SCALE; sx++)
-					put_px(x0 + gx * SCALE + sx, y0 + gy * SCALE + sy, c);
+			for (int sy = 0; sy < cscale; sy++)
+				for (int sx = 0; sx < cscale; sx++)
+					put_px(x0 + gx * cscale + sx, y0 + gy * cscale + sy, c);
 		}
 }
 
@@ -197,7 +197,7 @@ static void put_char(int col, char ch, uint32_t fg)
  * (digit = x / 50 mod 10, bars alternate red/green). A photo then shows
  * which buffer column the panel's left edge scans out.
  */
-static void draw_ruler(void)
+static void __attribute__((unused)) draw_ruler(void)
 {
 	/* screen coordinates now: if SCAN_SHIFT is right, bar 0 hugs the left edge */
 	for (int n = 0; n * 50 < FB_W; n++) {
@@ -1001,6 +1001,376 @@ static uint32_t gdsc_on(uint32_t gdscr)
 	return rd32(r);
 }
 
+#if defined(T290_GPU2)
+/*
+ * ---- gpu2: "Hello, GPU" without Android (build with -DT290_GPU2 and FW_DIR) ----
+ * Linux a5xx_hw_init()/a5xx_me_init() on bare metal: PM4/PFP microcode
+ * (firmware minus its first dword, as adreno_fw_create_bo) and a 32 KiB ring
+ * in plain DRAM, CP started, CP_ME_INIT, out of secure mode by writing
+ * RBBM_SECVID_TRUST_CNTL (the A504 loads no zap shader under Android), then
+ * CP_MEM_WRITE draws a green 100x100 square into the splash. The GPU sees
+ * physical addresses only if its SMMU passes them through: that is the test.
+ */
+extern const uint8_t gpu_pm4_fw[], gpu_pm4_fw_end[], gpu_pfp_fw[], gpu_pfp_fw_end[];	/* fw.S */
+
+#define GPU_MEM		0x90800000UL	/* spare part of the splash reservation (0xb0000000 hung, gpu2 runs 1-8) */
+#define GPU_PM4		(GPU_MEM + 0x00000)
+#define GPU_PFP		(GPU_MEM + 0x10000)
+#define GPU_RING	(GPU_MEM + 0x20000)
+#define GPU_RING_SZ	0x8000
+#define A5XX_CP_RB_BASE		0x800
+#define A5XX_CP_RB_CNTL		0x802
+#define A5XX_CP_RB_RPTR		0x806
+#define A5XX_CP_RB_WPTR		0x807
+#define A5XX_CP_PFP_INSTR_BASE	0x835
+#define A5XX_CP_ME_INSTR_BASE	0x838
+
+static unsigned odd_parity(unsigned v)
+{
+	v ^= v >> 16;
+	v ^= v >> 8;
+	v ^= v >> 4;
+	v &= 0xf;
+	return (~0x6996u >> v) & 1;
+}
+
+static uint32_t pm4_pkt7(unsigned op, unsigned cnt)
+{
+	return 0x70000000u | (cnt & 0x3fff) | (odd_parity(cnt) << 15) |
+	       ((op & 0x7f) << 16) | (odd_parity(op) << 23);
+}
+
+static void gpu_wr(uint32_t r, uint32_t v) { wr32(A5XX(r), v); }
+static uint32_t gpu_rd(uint32_t r) { return rd32(A5XX(r)); }
+
+static void copy_fw(uintptr_t dst, const uint8_t *fw, const uint8_t *end)
+{
+	/* skip the version dword; bytes because the blob may be unaligned */
+	uint32_t len = (uint32_t)(end - fw);
+	for (uint32_t i = 4; i + 3 < len; i += 4)
+		wr32(dst + i - 4, fw[i] | fw[i + 1] << 8 | fw[i + 2] << 16 | (uint32_t)fw[i + 3] << 24);
+}
+
+static uint32_t ring_n;
+static void ring_out(uint32_t v)
+{
+	wr32(GPU_RING + 4 * ring_n, v);
+	ring_n = (ring_n + 1) % (GPU_RING_SZ / 4);
+}
+
+/* in case LK left the D-cache on: push microcode, ring, page table to DRAM */
+static void gpu_flush(void)
+{
+	for (uintptr_t a = GPU_MEM; a < GPU_MEM + 0x40000; a += 64)
+		__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void gpu_kick_wait(const char *what)
+{
+	gpu_flush();
+	gpu_wr(A5XX_CP_RB_WPTR, ring_n);
+	for (int i = 0; i < 500 && gpu_rd(A5XX_CP_RB_RPTR) != ring_n; i++)
+		delay_ms(1);
+	con_hex3(what, "rptr=", gpu_rd(A5XX_CP_RB_RPTR), "wptr=", ring_n,
+		 "status=", gpu_rd(A5XX_RBBM_STATUS));
+}
+
+static void gpu_hello(void)
+{
+	/*
+	 * gpu2 run 1: CP took no ring dword (rptr 0, status c00003c1, no fault).
+	 * The GPU's memory path: gcc_bimc_gpu_clk (kgsl alt_mem_iface_clk) was
+	 * still off; also vote the GFX TBU/TCU and SMMU config clocks.
+	 */
+	STEP("gpu2 mem clocks");
+	int bg = clk_on(0x59030);			/* gcc_bimc_gpu_clk */
+	wr32(GCC_BASE + 0x4500c, rd32(GCC_BASE + 0x4500c) | 1U << 2 | 1U << 3 | 1U << 12 | 1U << 13);
+	delay_ms(1);
+	con_hex3("MEMCLK", "bimcgpu=", rd32(GCC_BASE + 0x59030) | bg, "vote=", rd32(GCC_BASE + 0x4500c),
+		 "tbu=", rd32(GCC_BASE + 0x12010));
+
+	/*
+	 * gpu2 run 3: RBBM_STATUS c00003c1 = CP + VBIF busy, no SMMU fault: the
+	 * CP's reads leave and never return. kgsl-iommu has
+	 * qcom,micro-mmu-control = <0x6000>: the SMMU's implementation-defined
+	 * MICRO_MMU_CTRL (bit 2 LOCAL_HALT_REQ, bit 3 IDLE), which kgsl sets to
+	 * halt the GPU's TBU around page-table switches. Release a halt.
+	 */
+	/*
+	 * gpu2 run 6: hwcg as Linux, still CP + VBIF busy. kgsl votes the bus
+	 * through the RPM ("grp3d": mas-oxili, mas-rpm-id 6 -> EBI) and the RPM
+	 * clock bimc_gpu (MEM_CLK id 2): do the same.
+	 */
+	STEP("gpu2 rpm votes");
+	{
+		static const uint32_t khz[] = { 0x007a484b /* "KHz" */, 400000 };
+		static const uint32_t bw[] = { 0x00007762 /* "bw" */, 2000000000 };
+		con_quiet = 1;
+		int rpm = smd_find_rpm() && smd_open();
+		uint32_t g = rpm ? rpm_req(0x326b6c63 /* "clk2" */, 2, khz, 1) : 0;
+		uint32_t m = rpm ? rpm_req(0x73616d62 /* "bmas" */, 6, bw, 1) : 0;
+		uint32_t s = rpm ? rpm_req(0x766c7362 /* "bslv" */, 0, bw, 1) : 0;
+		con_quiet = 0;
+		con_hex3("RPMBW", "gpuclk=", g | (uint32_t)rpm << 31, "mas=", m, "slv=", s);
+	}
+
+	/*
+	 * gpu2 runs 8-9: VBIF port 0 keeps one read outstanding whatever the
+	 * buffer address (0xb0000000 or the splash reservation): stuck in the
+	 * SMMU. Downstream arm-smmu, for an SMMU with qcom,tz-device-id, asks TZ
+	 * to restore its secure configuration at every power-up:
+	 * scm_restore_sec_cfg(TZ_DEVICE_GPU = 18, 0), SIP MP (2) cmd 2, SMC64.
+	 */
+	/*
+	 * gpu2 run 10: TZ refused that (ret -5). Do what kgsl does instead:
+	 * translate through context bank 0 (stream 0 -> CB0, set up by TZ) with
+	 * an identity table, AArch64 format, 4 KiB granule, 32-bit VA starting at
+	 * level 1: two 1 GiB blocks for the DRAM at 0x80000000-0xffffffff.
+	 */
+	/* run 10 used service 2 (PIL) by mistake: SCM_SVC_MP is 0xC */
+	STEP("gpu2 scm restore");
+	uint64_t sret = smc(0x42000C02, 2 /* SCM_ARGS(2) */, 18 /* TZ_DEVICE_GPU */, 0);
+	con_hex3("SCM", "ret=", (uint32_t)sret, "cr0=", rd32(0x01c40000UL), "s2cr0=", rd32(0x01c40000UL + 0xc00));
+
+	STEP("gpu2 smmu cb0");
+	{
+		/*
+		 * run 11: CB0 fsr 0x402 (translation fault, AArch64) at the PFP
+		 * microcode 0x90810000, inside the mapped block: the walk saw
+		 * zeros? Log SCTLR_EL1 (caches?), clean the buffers to DRAM, use
+		 * the usual 39-bit VA (T0SZ 25, level 1 = 512 entries).
+		 */
+		const uintptr_t smmu = 0x01c40000UL, cb = smmu + 0x8000, pt = GPU_MEM + 0x30000;
+		for (unsigned i = 0; i < 512; i++)
+			wr32(pt + 8 * i, 0), wr32(pt + 8 * i + 4, 0);
+		for (unsigned i = 2; i < 4; i++)	/* block | AttrIdx 0 | AP[1] | SH inner | AF */
+			wr32(pt + 8 * i, (uint32_t)i << 30 | 1U << 10 | 1U << 6 | 1);	/* run 13: SH=0 like the (working) walk */
+		for (uintptr_t a = GPU_MEM; a < GPU_MEM + 0x40000; a += 64)
+			__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+		__asm__ volatile("dsb sy" ::: "memory");
+		con_hex3("EL1", "sctlr=", (uint32_t)rsr("sctlr_el1"), "el=", (uint32_t)rsr("CurrentEL"),
+			 "pt2=", rd32(pt + 16));
+		wr32(cb + 0x0, 0);			/* CB_SCTLR: off while changing */
+		wr32(smmu + 0x1800, 0);			/* CBA2R0: AArch32 format (TZ owns it, run 12) */
+		wr32(cb + 0x38, 0x44);			/* CB_MAIR0: attr0 normal non-cacheable */
+		wr32(cb + 0x3c, 0);
+		wr32(cb + 0x10, 1);			/* CB_TCR2: PASize 36 bit */
+		wr32(cb + 0x30, 1U << 31 | 1U << 23);	/* CB_TTBCR: EAE (LPAE), T0SZ 0 = 32-bit VA from level 1, EPD1 */
+		wr32(cb + 0x20, (uint32_t)pt);		/* CB_TTBR0, ASID 0 */
+		wr32(cb + 0x24, 0);
+		wr32(cb + 0x58, rd32(cb + 0x58));	/* clear CB_FSR */
+		wr32(cb + 0x618, 0);			/* CB_S1_TLBIALL */
+		wr32(cb + 0x7f0, 0);			/* CB_TLBSYNC */
+		for (int i = 0; i < 100 && (rd32(cb + 0x7f4) & 1); i++)
+			delay_ms(1);
+		wr32(cb + 0x0, 1 | 1U << 1 | 1U << 2 | 1U << 5 | 1U << 6);	/* M TRE AFE CFRE CFIE */
+		__asm__ volatile("dsb sy" ::: "memory");
+		con_hex3("CB0SET", "sctlr=", rd32(cb + 0x0), "tcr=", rd32(cb + 0x30), "ttbr=", rd32(cb + 0x20));
+		con_hex3("CB0SET", "cba2r=", rd32(smmu + 0x1800), "fsr=", rd32(cb + 0x58), "tlbst=", rd32(cb + 0x7f4));
+	}
+
+	STEP("gpu2 micro mmu");
+	const uintptr_t mmu_ctrl = 0x01c40000UL + 0x6000;
+	uint32_t mm0 = rd32(mmu_ctrl);
+	wr32(mmu_ctrl, mm0 & ~(1U << 2));
+	delay_ms(1);
+	con_hex3("UMMU", "before=", mm0, "after=", rd32(mmu_ctrl), 0, 0);
+
+	STEP("gpu2 microcode");
+	copy_fw(GPU_PM4, gpu_pm4_fw, gpu_pm4_fw_end);
+	copy_fw(GPU_PFP, gpu_pfp_fw, gpu_pfp_fw_end);
+	con_hex3("FW", "pm4=", (uint32_t)(gpu_pm4_fw_end - gpu_pm4_fw), "pfp=",
+		 (uint32_t)(gpu_pfp_fw_end - gpu_pfp_fw), "pm4v=", rd32(GPU_PM4));
+	for (uint32_t i = 0; i < GPU_RING_SZ; i += 4)
+		wr32(GPU_RING + i, 0);
+
+	/*
+	 * gpu2 run 4: micro-MMU not halted (0x378), still CP + VBIF busy.
+	 * Linux a5xx_pm_resume for A50x: soft reset, halt sp_input_clk, hwcg on
+	 * (a50x_hwcg table), sp_input_clk back on.
+	 */
+	/* (RBBM_SW_RESET_CMD here reset the whole SoC: gpu2 run 5) */
+	STEP("gpu2 hwcg");
+	static const uint32_t a50x_hwcg[][2] = {
+		{ 0x0068, 0x02222222 }, { 0x006c, 0x02222220 }, { 0x0070, 0x0000F3CF }, { 0x0074, 0x00000080 },
+		{ 0x004a, 0x22222222 }, { 0x004e, 0x22222222 }, { 0x0052, 0x00002222 }, { 0x00b0, 0x77777777 },
+		{ 0x00b4, 0x77777777 }, { 0x00b8, 0x00007777 }, { 0x00a4, 0x11111111 }, { 0x00a8, 0x11111111 },
+		{ 0x00ac, 0x00001111 }, { 0x005b, 0x22222222 }, { 0x005c, 0x22222222 }, { 0x005d, 0x00222222 },
+		{ 0x005a, 0x22222222 }, { 0x005e, 0x00FFFFF4 }, { 0x005f, 0x00000002 }, { 0x0078, 0x22222222 },
+		{ 0x007c, 0x00222222 }, { 0x0082, 0x00022220 }, { 0x008a, 0x05522222 }, { 0x008b, 0x00505555 },
+		{ 0x0086, 0x04040404 }, { 0x0080, 0x07444044 }, { 0x008c, 0x00000002 }, { 0x0081, 0x00010011 },
+		{ 0x0063, 0x04222222 }, { 0x0060, 0x02222222 }, { 0x0091, 0x00002222 }, { 0x0064, 0x00000000 },
+		{ 0x0062, 0x04104004 }, { 0x0090, 0x00000000 }, { 0x0066, 0x00000000 }, { 0x0065, 0x00004000 },
+		{ 0x0061, 0x00000200 }, { 0x0092, 0x00002222 },
+	};
+	gpu_wr(0x0067, 0x00000055);		/* RBBM_CLOCK_CNTL: halt sp_input_clk */
+	for (unsigned i = 0; i < sizeof(a50x_hwcg) / sizeof(a50x_hwcg[0]); i++)
+		gpu_wr(a50x_hwcg[i][0], a50x_hwcg[i][1]);
+	gpu_wr(0x0067, 0xaaa8aa00);
+	gpu_wr(0x0533, 0x182);			/* RBBM_ISDB_CNT */
+	gpu_wr(0x0067, gpu_rd(0x0067) & ~0xffU);	/* sp_input_clk on */
+	con_hex3("HWCG", "clkcntl=", gpu_rd(0x0067), "status=", gpu_rd(A5XX_RBBM_STATUS), 0, 0);
+
+	/*
+	 * gpu2 run 7: RPM bus votes acked, still CP + VBIF busy. VBIF state:
+	 * XIN_HALT_CTRL0 (Linux halts the XIN ports before power collapse),
+	 * CTRL1 (halt ack), CLKON; release any halt.
+	 */
+	STEP("gpu2 vbif");
+	con_hex3("VBIF", "ver=", gpu_rd(0x3000), "clkon=", gpu_rd(0x3001), "halt=", gpu_rd(0x3080));
+	gpu_wr(0x3080, 0);			/* VBIF_XIN_HALT_CTRL0 */
+	con_hex3("VBIF", "hack=", gpu_rd(0x3081), "ahberr=", gpu_rd(0x04f4), "st3=", gpu_rd(0x0530));
+
+	STEP("gpu2 hw init");
+	gpu_wr(0x3049, 0x00000003);		/* VBIF_ROUND_ROBIN_QOS_ARB */
+	gpu_wr(0x0093, 0x00000001);		/* RBBM_AHB_CNTL0 */
+	gpu_wr(0x002f, 1U << 30 | 0xffff);	/* RBBM_INTERFACE_HANG_INT_CNTL */
+	gpu_wr(0x0464, 0x01);			/* RBBM_PERFCTR_CNTL */
+	gpu_wr(0x0e96, 0x02);			/* UCHE_CACHE_WAYS */
+	gpu_wr(0x0e89, 0xffff0000);		/* UCHE_TRAP_BASE */
+	gpu_wr(0x0e8a, 0x0001ffff);
+	gpu_wr(0x0e87, 0xffff0000);		/* UCHE_WRITE_THRU_BASE */
+	gpu_wr(0x0e88, 0x0001ffff);
+	gpu_wr(0x0e8b, 0x00100000);		/* UCHE_GMEM_RANGE_MIN */
+	gpu_wr(0x0e8c, 0x00000000);
+	gpu_wr(0x0e8d, 0x00100000 + 0x22000 - 1);	/* MAX: gmem 0x22000 (kgsl on A504) */
+	gpu_wr(0x0e8e, 0x00000000);
+	gpu_wr(0x0825, 0x20);			/* CP_MEQ_THRESHOLDS (a506 values) */
+	gpu_wr(0x0826, 0x400);			/* CP_MERCIU_SIZE */
+	gpu_wr(0x0820, 0x40000030);		/* CP_ROQ_THRESHOLDS_2 */
+	gpu_wr(0x081f, 0x20100d0a);		/* CP_ROQ_THRESHOLDS_1 */
+	gpu_wr(0x0d00, 0x100 << 11 | 0x100 << 22);	/* PC_DBG_ECO_CNTL */
+	gpu_wr(0x0e81, 1U << 29);		/* UCHE_MODE_CNTL */
+	gpu_wr(0x0833, 0x02000000);		/* CP_CHICKEN_DBG */
+	gpu_wr(0x0094, 0xa6ffffff);		/* RBBM_AHB_CNTL1 */
+	gpu_wr(0x0095, 0x0000003f);		/* RBBM_AHB_CNTL2 */
+	gpu_wr(0x0f02, 1U << 7);		/* TPL1_MODE_CNTL */
+	gpu_wr(0x0cc6, 1U << 1);		/* RB_MODE_CNTL */
+	gpu_wr(0x08a0, 0);			/* CP_PROTECT_CNTL: no register protection */
+	static const uint16_t addr_mode[] = { 0x860, 0xbc1, 0xc81, 0xcc5, 0xd01, 0xe05, 0xe41,
+					      0xe61, 0xe80, 0xec1, 0xf01, 0xf810 };
+	for (unsigned i = 0; i < sizeof(addr_mode) / sizeof(addr_mode[0]); i++)
+		gpu_wr(addr_mode[i], 1);	/* *_ADDR_MODE_CNTL: 64-bit addresses */
+	gpu_wr(0xf800, 0);			/* RBBM_SECVID_TSB_TRUSTED_BASE */
+	gpu_wr(0xf801, 0);
+	gpu_wr(0xf802, 0);			/* RBBM_SECVID_TSB_TRUSTED_SIZE */
+
+	/*
+	 * gpu2 run 2: SMMU on, stream 0 -> CB0 with translation off (bypass),
+	 * no global fault, yet the CP read nothing. The GPU still was secure
+	 * when the CP fetched its microcode (SECVID went 0 only after ME_INIT):
+	 * leave secure mode before the CP starts.
+	 */
+	STEP("gpu2 secvid off");
+	gpu_wr(A5XX_RBBM_SECVID_TRUST, 0);
+	con_hex3("SECVID", "trust=", gpu_rd(A5XX_RBBM_SECVID_TRUST), "int0=",
+		 gpu_rd(A5XX_RBBM_INT_0_STATUS), 0, 0);
+
+	STEP("gpu2 cp start");
+	gpu_flush();
+	gpu_wr(A5XX_CP_ME_INSTR_BASE, (uint32_t)GPU_PM4);
+	gpu_wr(A5XX_CP_ME_INSTR_BASE + 1, 0);
+	gpu_wr(A5XX_CP_PFP_INSTR_BASE, (uint32_t)GPU_PFP);
+	gpu_wr(A5XX_CP_PFP_INSTR_BASE + 1, 0);
+	gpu_wr(A5XX_CP_RB_BASE, (uint32_t)GPU_RING);
+	gpu_wr(A5XX_CP_RB_BASE + 1, 0);
+	gpu_wr(A5XX_CP_RB_CNTL, 12 | 2 << 8 | 1U << 27);	/* 32 KiB, 32 B blocks, NO_UPDATE */
+	gpu_wr(A5XX_CP_RB_WPTR, 0);
+	ring_n = 0;
+	gpu_wr(A5XX_CP_PFP_ME_CNTL, 0);
+	delay_ms(5);
+	con_hex3("CPSTART", "pfp_me=", gpu_rd(A5XX_CP_PFP_ME_CNTL), "status=", gpu_rd(A5XX_RBBM_STATUS),
+		 "fault=", gpu_rd(A5XX_CP_HW_FAULT));
+
+	uint32_t ps[2], ms[2];
+	for (unsigned i = 0; i < 2; i++) {
+		gpu_wr(0x0808, i);		/* CP_PFP_STAT_ADDR */
+		ps[i] = gpu_rd(0x0809);
+		gpu_wr(0x081a, i);		/* CP_ME_STAT_ADDR */
+		ms[i] = gpu_rd(0x0b14);
+	}
+	con_hex3("CPSTAT", "pfp0=", ps[0], "pfp1=", ps[1], "me0=", ms[0]);
+
+	STEP("gpu2 me init");
+	ring_out(pm4_pkt7(72, 8));		/* CP_ME_INIT */
+	ring_out(0x0000002f);
+	ring_out(0x00000003);
+	ring_out(0x20000000);
+	ring_out(0);
+	ring_out(0);
+	ring_out(0);
+	ring_out(0);
+	ring_out(0);
+	gpu_kick_wait("MEINIT");
+
+
+	/*
+	 * Green square: screen x 301..400 = buffer x 72..171 (229 px shift),
+	 * 300 bytes = 75 dwords per row, bytes R,B,G.
+	 */
+	STEP("gpu2 mem write");
+	static const uint8_t px[3] = { 0x00, 0x00, 0xff };	/* R, B, G: green */
+	for (unsigned y = 0; y < 100; y++) {
+		uintptr_t a = SPLASH_PHYS + (uintptr_t)(700 + y) * FB_W * 3 + 72 * 3;
+		ring_out(pm4_pkt7(61, 2 + 75));		/* CP_MEM_WRITE */
+		ring_out((uint32_t)a);
+		ring_out(0);
+		for (unsigned w = 0; w < 75; w++) {
+			uint32_t v = 0;
+			for (unsigned k = 0; k < 4; k++)
+				v |= (uint32_t)px[(4 * w + k) % 3] << (8 * k);
+			ring_out(v);
+		}
+	}
+	gpu_kick_wait("MEMWR");
+	con_hex3("AFTER", "int0=", gpu_rd(A5XX_RBBM_INT_0_STATUS), "fault=", gpu_rd(A5XX_CP_HW_FAULT),
+		 "pix=", rd32(SPLASH_PHYS + 750 * FB_W * 3 + 72 * 3));
+	con_str("GPU2", "green square at screen 301..400 x 700..799 = drawn by the GPU");
+
+	/* the GPU's SMMU (qcom,smmu-v2, TZ owns the global space): who blocks? */
+	STEP("gpu2 smmu read");
+	const uintptr_t smmu = 0x01c40000UL, cb = smmu + 0x8000;
+	con_hex3("SMMU", "cr0=", rd32(smmu + 0x0), "gfsr=", rd32(smmu + 0x48), "idr1=", rd32(smmu + 0x24));
+	con_hex3("SMMU", "smr0=", rd32(smmu + 0x800), "s2cr0=", rd32(smmu + 0xc00), "cbar0=", rd32(smmu + 0x1000));
+	con_hex3("CB0", "sctlr=", rd32(cb + 0x0), "fsr=", rd32(cb + 0x58), "far=", rd32(cb + 0x60));
+	con_hex3("CB0", "fsynr=", rd32(cb + 0x68), "ttbr0=", rd32(cb + 0x20), "farhi=", rd32(cb + 0x64));
+	con_hex3("SMR", "1=", rd32(smmu + 0x804), "2=", rd32(smmu + 0x808), "3=", rd32(smmu + 0x80c));
+	con_hex3("S2CR", "1=", rd32(smmu + 0xc04), "2=", rd32(smmu + 0xc08), "3=", rd32(smmu + 0xc0c));
+	con_hex3("CB", "0fsr=", rd32(cb + 0x58), "1fsr=", rd32(cb + 0x1058), "2fsr=", rd32(cb + 0x2058));
+	con_hex3("CB2", "sctlr=", rd32(cb + 0x2000), "far=", rd32(cb + 0x2060), "cbar2=", rd32(smmu + 0x1008));
+	con_hex3("VBIF", "halt=", gpu_rd(0x3080), "hack=", gpu_rd(0x3081), "clkon=", gpu_rd(0x3001));
+	con_hex3("AHB", "err=", gpu_rd(0x04f4), "mesplit=", gpu_rd(0x04f0), "pfpsplit=", gpu_rd(0x04f1));
+	con_hex3("UMMU", "end=", rd32(smmu + 0x6000), "rptr=", gpu_rd(A5XX_CP_RB_RPTR),
+		 "status=", gpu_rd(A5XX_RBBM_STATUS));
+
+	/*
+	 * The same ranges as t290/gpu/kgsl_regdump (Android's working GPU,
+	 * logs/kgsl-regdump.txt), pstore only: "R reg value", nonzero only.
+	 */
+	STEP("gpu2 regdump");
+	static const uint32_t dump[][2] = {
+		{ 0x0000, 0x00c0 }, { 0x0460, 0x0010 }, { 0x04e0, 0x0060 }, { 0x0800, 0x0040 },
+		{ 0x0860, 0x0002 }, { 0x08a0, 0x0020 }, { 0x0b00, 0x0020 }, { 0x0bc0, 0x0002 },
+		{ 0x0c80, 0x0002 }, { 0x0cc0, 0x0008 }, { 0x0d00, 0x0002 }, { 0x0e00, 0x0008 },
+		{ 0x0e40, 0x0002 }, { 0x0e60, 0x0002 }, { 0x0e80, 0x0020 }, { 0x0ec0, 0x0002 },
+		{ 0x0f00, 0x0004 }, { 0x3000, 0x0090 }, { 0xf400, 0x0004 }, { 0xf800, 0x0012 },
+	};
+	for (unsigned r = 0; r < sizeof(dump) / sizeof(dump[0]); r++)
+		for (uint32_t i = 0; i < dump[r][1]; i++) {
+			uint32_t reg = dump[r][0] + i, v = gpu_rd(reg);
+			if (!v)
+				continue;
+			plog_str("R ");
+			plog_hex(reg, 5);
+			plog_putc(' ');
+			plog_hex(v, 8);
+			plog_str("\n");
+		}
+	con_str("REGDUMP", "in pstore");
+}
+#endif
+
 static void __attribute__((unused)) gpu_probe(void)
 {
 	con_quiet = 0;
@@ -1038,6 +1408,9 @@ static void __attribute__((unused)) gpu_probe(void)
 	STEP("gpu read secvid");
 	con_hex3("SECVID", "trust=", rd32(A5XX(A5XX_RBBM_SECVID_TRUST)), 0, 0, 0, 0);
 	con_str("GPU", "registers answered");
+#if defined(T290_GPU2)
+	gpu_hello();
+#endif
 }
 
 /*
@@ -1530,6 +1903,261 @@ static const char *xnu_boot(uintptr_t dtb)
 	return "xnu returned";
 }
 
+/*
+ * ---- boot menu: big buttons driven by the touchscreen, like TWRP ----
+ * iPadOS boots the xnu payload, Android warm-resets into LK with a normal
+ * restart reason, the diagnostics run the GPU probe, and the log viewer
+ * pages through this run's pstore log. Touch: FT5452 over bit-banged I2C
+ * (QUP3 bus-errors, see touch_probe), polled.
+ */
+#define PSCI_SYSTEM_RESET	0x84000009UL
+#define IMEM_RESTART_REASON	0x0860065cUL	/* qcom,msm-imem-restart_reason */
+#define RESTART_NORMAL		0x77665501U
+#define PSHOLD_BASE		0x004ab000UL	/* qcom,pshold */
+
+#define DARK	0x203040U
+#define GREY	0x505a68U
+#define IOSBLUE	0x1060d0U
+
+struct button {
+	int x, y, w, h;
+	const char *label;
+	uint32_t color;
+};
+
+static int ts_ok;
+
+static int touch_init(void)
+{
+	static const uint32_t l10[] = { RPM_KEY_UV, 3300000, RPM_KEY_SWEN, 1 };
+	static const uint32_t l5[] = { RPM_KEY_UV, 1800000, RPM_KEY_SWEN, 1 };
+
+	STEP("menu touch power");
+	int q = con_quiet;
+	con_quiet = 1;
+	if (smd_find_rpm() && smd_open()) {
+		rpm_req(RPM_LDOA, 5, l5, 2);
+		rpm_req(RPM_LDOA, 10, l10, 2);
+	}
+	con_quiet = q;
+	STEP("menu touch reset");
+	tlmm_cfg(65, 0, 3, 2, 0);		/* IRQ: input, pull-up */
+	tlmm_cfg(64, 0, 3, 8, 1);		/* RESET: output */
+	tlmm_set(64, 0);
+	delay_ms(10);
+	tlmm_set(64, 1);
+	delay_ms(250);
+	tlmm_cfg(10, 0, 0, 2, 0);		/* bit-banged SDA/SCL: GPIO, no pull */
+	tlmm_cfg(11, 0, 0, 2, 0);
+	delay_ms(1);
+	STEP("menu touch id");
+	return (bb_read_reg(FTS_ADDR, 0xa3) & 0x100) != 0;
+}
+
+/* 1: finger down at (x, y), 0: no finger, -1: read failed */
+static int touch_get(int *x, int *y)
+{
+	uint8_t b[9];
+	if (bb_read_buf(FTS_ADDR, 0, b, sizeof(b)))
+		return -1;
+	if ((b[2] & 15) == 0 || (b[3] >> 6) == 1)	/* no points or lift-up event */
+		return 0;
+	*x = (b[3] & 15) << 8 | b[4];
+	*y = (b[5] & 15) << 8 | b[6];
+	return 1;
+}
+
+static void fill_rect(int x, int y, int w, int h, uint32_t c)
+{
+	for (int j = y; j < y + h; j++)
+		for (int i = x; i < x + w; i++)
+			put_px(i, j, c);
+}
+
+static void text_at(int x, int y, const char *s, uint32_t fg, uint32_t back, int scale)
+{
+	int old = cscale;
+	uint32_t ob = bg;
+	cscale = scale;
+	bg = back;
+	for (; *s; s++, x += CH_W)
+		draw_glyph(x, y, *s, fg);
+	cscale = old;
+	bg = ob;
+}
+
+static int str_len(const char *s)
+{
+	int n = 0;
+	while (s[n])
+		n++;
+	return n;
+}
+
+static void draw_button(const struct button *b, int pressed)
+{
+	uint32_t c = pressed ? WHITE : b->color, t = pressed ? b->color : WHITE;
+	fill_rect(b->x, b->y, b->w, b->h, c);
+	int len = str_len(b->label), sc = b->h >= 120 ? 3 : 2;
+	text_at(b->x + (b->w - len * 8 * sc) / 2, b->y + (b->h - 16 * sc) / 2, b->label, t, c, sc);
+}
+
+/* filled in code: a static table of string pointers needs ABS64 relocations */
+static void set_btn(struct button *b, int x, int y, int w, int h, const char *label, uint32_t color)
+{
+	b->x = x;
+	b->y = y;
+	b->w = w;
+	b->h = h;
+	b->label = label;
+	b->color = color;
+}
+
+static int hit(const struct button *b, int x, int y)
+{
+	return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h;
+}
+
+/* Wait for a tap (press and release on the same button); returns its index. */
+static int wait_tap(const struct button *bs, int n)
+{
+	int down = -1;
+	for (;;) {
+		int x = 0, y = 0, t = touch_get(&x, &y);
+		if (t == 1 && down < 0) {
+			for (int i = 0; i < n; i++)
+				if (hit(&bs[i], x, y)) {
+					down = i;
+					draw_button(&bs[i], 1);
+				}
+		} else if (t == 0 && down >= 0) {
+			draw_button(&bs[down], 0);
+			return down;
+		}
+		delay_ms(15);
+	}
+}
+
+static void log_viewer(void)
+{
+	struct button nav[3];
+	set_btn(&nav[0], 16, 1150, 248, 114, "Up", GREY);
+	set_btn(&nav[1], 276, 1150, 248, 114, "Down", GREY);
+	set_btn(&nav[2], 536, 1150, 248, 114, "Back", IOSBLUE);
+	const volatile char *log = (const volatile char *)(PLOG_BASE + 12);
+	const int rows = 70, cols = 96;			/* 8x16 font above the buttons */
+	int first = 0;
+	con_clear(DARK);
+	for (int i = 0; i < 3; i++)
+		draw_button(&nav[i], 0);
+	for (;;) {
+		/* count lines, find the start of line `first` */
+		int lines = 1, start = 0, l = 0;
+		for (uint32_t i = 0; i < plog_len; i++)
+			if (log[i] == '\n' && i + 1 < plog_len) {
+				lines++;
+				if (++l == first)
+					start = (int)i + 1;
+			}
+		if (first == 0)
+			start = 0;
+		fill_rect(0, 0, FB_W, 1140, DARK);
+		uint32_t p = (uint32_t)start;
+		for (int r = 0; r < rows && p < plog_len; r++) {
+			char buf[97];
+			int c = 0;
+			while (p < plog_len && log[p] != '\n') {
+				if (c < cols)
+					buf[c++] = log[p];
+				p++;
+			}
+			p++;
+			buf[c] = 0;
+			uint32_t fg = buf[0] == '>' ? GREEN : buf[0] == 'R' && buf[1] == ' ' ? GREY : WHITE;
+			text_at(8, 8 + r * 16, buf, fg, DARK, 1);
+		}
+		int k = wait_tap(nav, 3);
+		if (k == 2)
+			return;
+		first += k == 0 ? -(rows - 4) : rows - 4;
+		if (first > lines - rows)
+			first = lines - rows;
+		if (first < 0)
+			first = 0;
+	}
+}
+
+static void boot_android(void)
+{
+	con_clear(DARK);
+	text_at(40, 600, "Rebooting to Android...", WHITE, DARK, 3);
+	STEP("menu android reset");
+	wr32(IMEM_RESTART_REASON, RESTART_NORMAL);
+	__asm__ volatile("dsb sy" ::: "memory");
+	delay_ms(300);
+	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+	/*
+	 * First menu build: the button did not reboot (TZ ignores PSCI
+	 * SYSTEM_RESET?). Linux msm-poweroff resets by dropping PS_HOLD
+	 * (qcom,pshold 0x4ab000): the PMIC then resets the SoC.
+	 */
+	STEP("menu android ps_hold");
+	wr32(PSHOLD_BASE, 0);
+	__asm__ volatile("dsb sy" ::: "memory");
+	delay_ms(2000);
+	text_at(40, 700, "reset failed", RED, DARK, 3);
+}
+
+static void boot_menu(uint64_t dtb, uint32_t runs)
+{
+	struct button menu[4], again[2];
+	set_btn(&menu[0], 50, 260, 700, 180, "iPadOS 16", IOSBLUE);
+	set_btn(&menu[1], 50, 480, 700, 180, "Android", GREEN);
+	set_btn(&menu[2], 50, 700, 700, 150, "GPU diagnostics", GREY);
+	set_btn(&menu[3], 50, 890, 700, 150, "Boot log", GREY);
+	set_btn(&again[0], 16, 1150, 380, 114, "Log", GREY);
+	set_btn(&again[1], 404, 1150, 380, 114, "Back", IOSBLUE);
+	STEP("menu");
+	ts_ok = touch_init();
+	for (;;) {
+		con_clear(DARK);
+		text_at(50, 80, "SM-T290", WHITE, DARK, 4);
+		text_at(50, 160, "Choose a system", YELLOW, DARK, 2);
+		for (int i = 0; i < 4; i++)
+			draw_button(&menu[i], 0);
+		if (!ts_ok) {
+			/* no touch: the menu cannot be used, keep the old behaviour */
+			text_at(50, 1100, "touch not found: iPadOS in 5 s", RED, DARK, 2);
+			delay_ms(5000);
+			break;
+		}
+		char run[] = "run 0000";
+		fmt_hex(run + 4, runs, 4);
+		text_at(50, 1200, run, GREY, DARK, 2);
+		int k = wait_tap(menu, 4);
+		if (k == 0)
+			break;
+		if (k == 1) {
+			boot_android();
+			continue;
+		}
+		if (k == 2) {
+			con_clear(DARK);
+			con_str("T290", "GPU diagnostics");
+			gpu_probe();
+			for (int i = 0; i < 2; i++)
+				draw_button(&again[i], 0);
+			if (wait_tap(again, 2) == 0)
+				log_viewer();
+			continue;
+		}
+		log_viewer();
+	}
+	con_clear(DARK);
+	con_str("T290", "booting iPadOS 16");
+	(void)dtb;
+}
+
 void shim_main(uint64_t dtb)
 {
 	uint32_t runs = plog_init();
@@ -1543,7 +2171,11 @@ void shim_main(uint64_t dtb)
 	detect_splash_format();
 	STEP("clear screen");
 	con_clear(0x203040);
+#if !defined(T290_TOUCH_PROBE) && !defined(T290_GPU_PROBE)
+	boot_menu(dtb, runs);
+#else
 	draw_ruler();
+#endif
 	con_str("T290", "milestone 5: xnu loader / diagnostics");
 	con_hex3("RUN", "n=", runs, "dtb=", (uint32_t)dtb, 0, 0);
 	/* An xnu payload in the ramdisk means: boot it. */
@@ -1555,7 +2187,7 @@ void shim_main(uint64_t dtb)
 #endif
 #if defined(T290_GPU_PROBE)
 	gpu_probe();
-	con_str("DONE", "gpu1 probe: take a photo");
+	con_str("DONE", "gpu probe: take a photo");
 	STEP("done");
 	hold();
 #endif

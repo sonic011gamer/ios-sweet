@@ -3,3 +3,4 @@ kgsl_blit
 kgsl_compute
 kgsl_present
 *.bin
+kgsl_regdump

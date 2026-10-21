@@ -116,6 +116,29 @@ from an Android app) and compare HLSQ/SP CS registers. (2) 2D scaling: the
 "few more registers" Mesa mentions - capture a scaled blit from the blob
 (C2D / GLES glBlitFramebuffer). (3) Bare-metal: zap shader via TZ (a506_zap).
 
+## gpu2 bare metal (2026-10-21, t290/shim -DT290_GPU_PROBE -DT290_GPU2, FW_DIR)
+Microcode (fw.S .incbin), a5xx_hw_init values, ring 32 KiB, CP_ME_INIT, SECVID 0,
+CP_MEM_WRITE square. Logs: ios-t290/logs/gpu*-pstore.txt. Result so far: the CP
+never takes a ring dword (rptr 0), RBBM_STATUS c00003c1, no interrupt/fault.
+- Ruled out: bimc_gpu clock (0x59030, was off: now on), GFX TBU/TCU votes,
+  micro-MMU halt (SMMU+0x6000 = 0x378, not halted), VBIF XIN halt, buffer
+  address (0xb0000000 vs splash reservation 0x90800000), D-cache (SCTLR_EL1 =
+  0x00c00800), RPM bus votes (clk2 id 2, bmas 6, bslv 0: acked), SECVID before
+  CP start, a50x hwcg. RBBM_SW_RESET_CMD resets the whole SoC: never write it.
+- SCM restore_sec_cfg: my call used service 2 (PIL) instead of 0xC (MP): -5.
+  Retry with fn 0x42000C02, args (18 = TZ_DEVICE_GPU, 0).
+- SMMU (0x1c40000): sCR0 0x00200436 (client on, USFCFG), SMR0 id 0 mask 1 ->
+  S2CR0 translate CB0, CBAR0 0x1b003. CB0 SCTLR 0 (bypass) = silent hang.
+  **The CB format is AArch32 (TZ):** an LPAE table (TTBCR EAE, T0SZ 0, 1 GiB
+  identity blocks at L1, MAIR0 0x44) translates without fault (fsr 0x200);
+  CBA2R VA64 / AArch64 TCR gave translation faults at the PFP microcode.
+  With SH=0 the micro-MMU ends idle; the CP still takes nothing.
+- Reference from Android (t290/gpu/kgsl_regdump.c, CP_REG_TO_MEM, logs/
+  kgsl-regdump.txt): VBIF identical; RBBM_STATUS c00003c2 there too (busy
+  bits are normal); CP/UCHE/SECVID/RBBM clock/SMMU ranges are CP-protected
+  (unreadable). Differences are kgsl quirk registers (TPL1 0xf02 0x4d4, PC
+  0xd00 |0x100, HLSQ 0xe00/0xe06, VPC 0xe60, SP 0xec0) and live CP counters.
+
 ## Open questions
 1. SMMU: bypass or context bank programming from EL1 (Linux kgsl does it, so
    the CB registers are reachable from the apps EE).
