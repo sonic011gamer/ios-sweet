@@ -42,6 +42,7 @@ t290_freedreno_screen(void)
    driParseOptionInfo(&defaults, t290_fd_options, ARRAY_SIZE(t290_fd_options));
    driParseConfigFiles(&options, &defaults, 0, "msm", NULL, NULL, NULL, 0, NULL, 0);
    config.options = &options;
+   config.options_info = &defaults;
    return fd_screen_create(FD_SWEET_FD, &config, NULL);
 }
 #endif

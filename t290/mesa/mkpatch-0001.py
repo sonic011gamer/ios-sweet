@@ -98,3 +98,13 @@ edit('src/freedreno/ir3/ir3_disk_cache.c', '''   const char *renderer = fd_dev_n
 #endif
 ''')
 print('ok ir3 disk cache id')
+# fd_screen_create() goes through fd_device_new_dup(): dup(FD_SWEET_FD) would
+# fail and the device silently fall back to drm (-> softpipe)
+edit('src/freedreno/drm/freedreno_device.c', '''   int dup_fd = os_dupfd_cloexec(fd);
+''', '''#ifdef HAVE_FREEDRENO_SWEET
+   if (fd == FD_SWEET_FD)
+      return fd_device_new(fd);
+#endif
+   int dup_fd = os_dupfd_cloexec(fd);
+''')
+print('ok sweet dup')
