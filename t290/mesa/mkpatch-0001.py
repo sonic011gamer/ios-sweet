@@ -71,3 +71,30 @@ endif''')
 print('ok darwin drm')
 edit('src/freedreno/drm/meson.build', '''  link_with : [libvdrm],''', '''  link_with : freedreno_kmds.contains('virtio') ? [libvdrm] : [],''')
 print('ok libvdrm')
+edit('src/freedreno/ir3/ir3_disk_cache.c', '''   const char *renderer = fd_dev_name(compiler->dev_id);
+   const struct build_id_note *note =
+      build_id_find_nhdr_for_addr(ir3_disk_cache_init);
+   assert(note && build_id_length(note) == 20); /* sha1 */
+
+   const uint8_t *id_sha1 = build_id_data(note);
+   assert(id_sha1);
+''', '''   const char *renderer = fd_dev_name(compiler->dev_id);
+#ifdef __APPLE__
+   /* Darwin has no ELF build-id: hash the library's path and mtime */
+   struct mesa_sha1 id_ctx;
+   uint8_t id_buf[20];
+   _mesa_sha1_init(&id_ctx);
+   if (!disk_cache_get_function_identifier(ir3_disk_cache_init, &id_ctx))
+      return;
+   _mesa_sha1_final(&id_ctx, id_buf);
+   const uint8_t *id_sha1 = id_buf;
+#else
+   const struct build_id_note *note =
+      build_id_find_nhdr_for_addr(ir3_disk_cache_init);
+   assert(note && build_id_length(note) == 20); /* sha1 */
+
+   const uint8_t *id_sha1 = build_id_data(note);
+   assert(id_sha1);
+#endif
+''')
+print('ok ir3 disk cache id')

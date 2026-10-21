@@ -1,6 +1,6 @@
 diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
 --- a/src/gallium/targets/osmesa/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:29:26.520193303 +0800
++++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:33:13.567964711 +0800
 @@ -4,6 +4,17 @@
  osmesa_link_with = []
  osmesa_link_args = []
@@ -44,8 +44,8 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
    soversion : host_machine.system() == 'windows' ? '' : '8',
 diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
 --- a/src/gallium/targets/osmesa/osmesa_target.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:29:25.122921494 +0800
-@@ -26,6 +26,32 @@
++++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:33:13.157434728 +0800
+@@ -26,6 +26,33 @@
  
  #include "sw/null/null_sw_winsys.h"
  
@@ -55,6 +55,7 @@ diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osm
 +#include "util/driconf.h"
 +#include "util/xmlconfig.h"
 +#include "util/u_math.h"
++#include "util/u_inlines.h"
 +#include "freedreno/freedreno_screen.h"
 +#include "freedreno/drm/freedreno_drmif.h"
 +
@@ -71,14 +72,14 @@ diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osm
 +   driParseOptionInfo(&defaults, t290_fd_options, ARRAY_SIZE(t290_fd_options));
 +   driParseConfigFiles(&options, &defaults, 0, "msm", NULL, NULL, NULL, 0, NULL, 0);
 +   config.options = &options;
-+   return fd_screen_create(FD_SWEET_FD, NULL, &config);
++   return fd_screen_create(FD_SWEET_FD, &config, NULL);
 +}
 +#endif
 +
  
  struct pipe_screen *
  osmesa_create_screen(void);
-@@ -37,6 +63,14 @@
+@@ -37,6 +64,14 @@
     struct sw_winsys *winsys;
     struct pipe_screen *screen;
  

@@ -24,6 +24,7 @@ edit('src/gallium/targets/osmesa/osmesa_target.c', '''#include "sw/null/null_sw_
 #include "util/driconf.h"
 #include "util/xmlconfig.h"
 #include "util/u_math.h"
+#include "util/u_inlines.h"
 #include "freedreno/freedreno_screen.h"
 #include "freedreno/drm/freedreno_drmif.h"
 
@@ -40,7 +41,7 @@ t290_freedreno_screen(void)
    driParseOptionInfo(&defaults, t290_fd_options, ARRAY_SIZE(t290_fd_options));
    driParseConfigFiles(&options, &defaults, 0, "msm", NULL, NULL, NULL, 0, NULL, 0);
    config.options = &options;
-   return fd_screen_create(FD_SWEET_FD, NULL, &config);
+   return fd_screen_create(FD_SWEET_FD, &config, NULL);
 }
 #endif
 ''')
