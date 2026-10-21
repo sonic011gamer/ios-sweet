@@ -1,0 +1,86 @@
+diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
+--- a/src/gallium/targets/osmesa/meson.build	2024-11-28 08:08:18.000000000 +0800
++++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:24:28.172671927 +0800
+@@ -4,6 +4,15 @@
+ osmesa_link_with = []
+ osmesa_link_args = []
+ osmesa_link_deps = []
++osmesa_c_args = []
++osmesa_deps = []
++
++# SM-T290 iPadOS: Freedreno on SweetGPU (t290/mesa)
++if host_machine.system() == 'darwin' and with_gallium_freedreno
++  osmesa_c_args += '-DT290_SWEET'
++  osmesa_deps += driver_freedreno
++  osmesa_link_args += ['-framework', 'IOKit', '-framework', 'CoreFoundation']
++endif
+ 
+ if with_shared_glapi
+   osmesa_link_with += libglapi
+@@ -25,6 +34,7 @@
+ libosmesa = shared_library(
+   osmesa_lib_name,
+   'osmesa_target.c',
++  c_args : osmesa_c_args,
+   gnu_symbol_visibility : 'hidden',
+   link_args : [ld_args_gc_sections, osmesa_link_args],
+   vs_module_defs : osmesa_def,
+@@ -39,6 +49,7 @@
+   ],
+   dependencies : [
+     dep_ws2_32, dep_selinux, dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
++    osmesa_deps,
+   ],
+   name_prefix : host_machine.system() == 'windows' ? '' : [],  # otherwise mingw will create libosmesa.dll
+   soversion : host_machine.system() == 'windows' ? '' : '8',
+diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
+--- a/src/gallium/targets/osmesa/osmesa_target.c	2024-11-28 08:08:18.000000000 +0800
++++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:24:28.171290670 +0800
+@@ -26,6 +26,32 @@
+ 
+ #include "sw/null/null_sw_winsys.h"
+ 
++#ifdef T290_SWEET
++/* SM-T290 iPadOS: Freedreno on the SweetGPU user client (t290/mesa) */
++#include <stdlib.h>
++#include "util/driconf.h"
++#include "util/xmlconfig.h"
++#include "util/u_math.h"
++#include "freedreno/freedreno_screen.h"
++#include "freedreno/drm/freedreno_drmif.h"
++
++static const driOptionDescription t290_fd_options[] = {
++#include "pipe-loader/driinfo_gallium.h"
++#include "freedreno/driinfo_freedreno.h"
++};
++
++static struct pipe_screen *
++t290_freedreno_screen(void)
++{
++   static driOptionCache defaults, options;
++   static struct pipe_screen_config config;
++   driParseOptionInfo(&defaults, t290_fd_options, ARRAY_SIZE(t290_fd_options));
++   driParseConfigFiles(&options, &defaults, 0, "msm", NULL, NULL, NULL, 0, NULL, 0);
++   config.options = &options;
++   return fd_screen_create(FD_SWEET_FD, NULL, &config);
++}
++#endif
++
+ 
+ struct pipe_screen *
+ osmesa_create_screen(void);
+@@ -37,6 +63,14 @@
+    struct sw_winsys *winsys;
+    struct pipe_screen *screen;
+ 
++#ifdef T290_SWEET
++   if (!getenv("OSMESA_SOFTPIPE")) {
++      screen = t290_freedreno_screen();
++      if (screen)
++         return debug_screen_wrap(screen);
++   }
++#endif
++
+    /* We use a null software winsys since we always just render to ordinary
+     * driver resources.
+     */

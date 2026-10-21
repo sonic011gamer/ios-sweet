@@ -33,3 +33,4 @@ jobs:
             mesa-work/mesa-24.2.8/build/src/freedreno/drm/*.a
             mesa-work/mesa-24.2.8/build/src/gallium/drivers/freedreno/*.a
             mesa-work/mesa-24.2.8/build/src/mesa/*.a
+            mesa-work/out
