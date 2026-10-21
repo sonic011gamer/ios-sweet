@@ -38,12 +38,12 @@ ninja -C build src/compiler/spirv/spirv_info.h src/compiler/spirv/vtn_generator_
 ninja -C build -k 0 src/gallium/targets/osmesa/libOSMesa.8.dylib 2>&1 | tee "$work/build.log" | grep -E "error|FAILED" | head -200 || true
 grep -c "FAILED" "$work/build.log" || true
 
-# OSMesa dylib + the GL test, ad-hoc signed, for /usr/lib/t290 on the tablet
+# OSMesa dylib + the GL test, ad-hoc signed, for /usr/lib on the tablet
 out=$work/out
 mkdir -p "$out"
 lib=$(ls build/src/gallium/targets/osmesa/libOSMesa*.dylib | head -1)
 cp -L "$lib" "$out/libOSMesa.8.dylib"
-install_name_tool -id /usr/lib/t290/libOSMesa.8.dylib "$out/libOSMesa.8.dylib"
+install_name_tool -id /usr/lib/libOSMesa.8.dylib "$out/libOSMesa.8.dylib"
 codesign -s - -f "$out/libOSMesa.8.dylib"
 xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall \
 	-Iinclude -o "$out/gltri" "$here/test/gltri.c" "$out/libOSMesa.8.dylib"
