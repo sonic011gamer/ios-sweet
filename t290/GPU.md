@@ -183,3 +183,12 @@ never takes a ring dword (rptr 0), RBBM_STATUS c00003c1, no interrupt/fault.
 3. Register access safety: MDP reads reset the SoC (diag milestone 1) — do
    the same probe-with-pstore-log dance for 0x1c00000 (RBBM_CHIP_ID etc.)
    only after the GDSC and clocks are on.
+
+## Kernel GPU interface (2026-10-21, patch 0124): verified on the tablet
+`SWEET GPU: self-test IB at 0x10000000 -> OK in 126 us (fence 1/1, marker
+0x5a5aa5a5)`: an indirect buffer in the user window (our level-2/3 SMMU
+tables under the shim's level-1 table, 4 KiB pages, 0x10000000-0x7fffffff)
+ran from the ring and the CACHE_FLUSH_TS fence landed. SweetGPU (IOKit,
+IOResources) offers info/alloc+map/free/submit/wait/fence to user space.
+Next: an iOS user-space test of SweetGPU (needs an iOS arm64 build path and
+a way to put files on the HFS root), then Mesa Freedreno's winsys on it.
