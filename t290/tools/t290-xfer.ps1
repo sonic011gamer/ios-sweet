@@ -49,6 +49,14 @@ if ($Result) {
 }
 
 $ops = @(); $blobs = @(); $lba = $DataLba; $man = @()
+# gets first: they see the files as they were before this request
+foreach ($g in $Get) {
+	$remote, $local = $g -split '=', 2
+	$cap = 16MB
+	$ops += @{ op = 2; mode = 0; size = [uint64]$cap; lba = [uint64]$lba; path = $remote }
+	$man += @{ remote = $remote; local = $local }
+	$lba += $cap / 512 + 8
+}
 foreach ($p in $Put) {
 	$src, $rest = $p -split '=', 2
 	$dst, $mode = $rest -split ':(?=[0-7]+$)', 2
@@ -57,13 +65,6 @@ foreach ($p in $Put) {
 	$ops += @{ op = 1; mode = [Convert]::ToUInt32($mode, 8); size = [uint64]$data.Length; lba = [uint64]$lba; path = $dst }
 	$blobs += @{ lba = $lba; data = $data }
 	$lba += [math]::Ceiling($data.Length / 512) + 8
-}
-foreach ($g in $Get) {
-	$remote, $local = $g -split '=', 2
-	$cap = 16MB
-	$ops += @{ op = 2; mode = 0; size = [uint64]$cap; lba = [uint64]$lba; path = $remote }
-	$man += @{ remote = $remote; local = $local }
-	$lba += $cap / 512 + 8
 }
 if ($ops.Count -eq 0 -or $ops.Count -gt 32) { throw '1..32 operations' }
 $total = ($lba - $XferLba) * 512
