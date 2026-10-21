@@ -1,0 +1,96 @@
+diff -ruN a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+--- a/src/freedreno/common/freedreno_devices.py	2024-11-28 08:08:18.000000000 +0800
++++ b/src/freedreno/common/freedreno_devices.py	2026-10-21 19:15:34.648902859 +0800
+@@ -250,6 +250,7 @@
+     ))
+ 
+ add_gpus([
++        GPUId(504),     # SM-T290 (SDM429)
+         GPUId(506),
+         GPUId(508),
+         GPUId(509),
+diff -ruN a/src/freedreno/drm/freedreno_device.c b/src/freedreno/drm/freedreno_device.c
+--- a/src/freedreno/drm/freedreno_device.c	2024-11-28 08:08:18.000000000 +0800
++++ b/src/freedreno/drm/freedreno_device.c	2026-10-21 19:15:34.648177590 +0800
+@@ -41,6 +41,9 @@
+ #ifdef HAVE_FREEDRENO_VIRTIO
+ struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
+ #endif
++#ifdef HAVE_FREEDRENO_SWEET
++struct fd_device *sweet_device_new(void);
++#endif
+ 
+ uint64_t os_page_size = 4096;
+ 
+@@ -53,6 +56,15 @@
+ 
+    os_get_page_size(&os_page_size);
+ 
++#ifdef HAVE_FREEDRENO_SWEET
++   if (fd == FD_SWEET_FD) {
++      dev = sweet_device_new();
++      if (!dev)
++         return NULL;
++      goto common;
++   }
++#endif
++
+    /* figure out if we are kgsl or msm drm driver: */
+    version = drmGetVersion(fd);
+    if (!version) {
+@@ -96,6 +108,9 @@
+    if (!dev)
+       return NULL;
+ 
++#ifdef HAVE_FREEDRENO_SWEET
++common:
++#endif
+    fd_drm_perfetto_init();
+ 
+    fd_rd_dump_env_init();
+diff -ruN a/src/freedreno/drm/freedreno_drmif.h b/src/freedreno/drm/freedreno_drmif.h
+--- a/src/freedreno/drm/freedreno_drmif.h	2024-11-28 08:08:18.000000000 +0800
++++ b/src/freedreno/drm/freedreno_drmif.h	2026-10-21 19:15:34.648477504 +0800
+@@ -51,6 +51,9 @@
+    FD_PIPE_MAX
+ };
+ 
++/* fd_device_new(FD_SWEET_FD): the SweetGPU user client (SM-T290 iPadOS) */
++#define FD_SWEET_FD (-1000)
++
+ enum fd_param_id {
+    FD_DEVICE_ID,
+    FD_GMEM_SIZE,
+diff -ruN a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
+--- a/src/freedreno/drm/meson.build	2024-11-28 08:08:18.000000000 +0800
++++ b/src/freedreno/drm/meson.build	2026-10-21 19:15:34.647126357 +0800
+@@ -62,6 +62,17 @@
+   ]
+ endif
+ 
++# SM-T290 iPadOS: the SweetGPU IOKit user client (t290/mesa)
++if host_machine.system() == 'darwin'
++  libfreedreno_drm_files += files(
++    'sweet/sweet_bo.c',
++    'sweet/sweet_device.c',
++    'sweet/sweet_pipe.c',
++    'sweet/sweet_priv.h',
++  )
++  libfreedreno_drm_flags += '-DHAVE_FREEDRENO_SWEET'
++endif
++
+ libfreedreno_drm = static_library(
+   'freedreno_drm',
+   [
+diff -ruN a/src/freedreno/meson.build b/src/freedreno/meson.build
+--- a/src/freedreno/meson.build	2024-11-28 08:08:18.000000000 +0800
++++ b/src/freedreno/meson.build	2026-10-21 19:15:34.649097252 +0800
+@@ -25,7 +25,7 @@
+ subdir('ir3')
+ subdir('fdl')
+ 
+-if system_has_kms_drm
++if system_has_kms_drm or host_machine.system() == 'darwin'
+   subdir('drm')
+ endif
+ 
