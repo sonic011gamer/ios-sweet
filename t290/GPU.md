@@ -116,6 +116,29 @@ from an Android app) and compare HLSQ/SP CS registers. (2) 2D scaling: the
 "few more registers" Mesa mentions - capture a scaled blit from the blob
 (C2D / GLES glBlitFramebuffer). (3) Bare-metal: zap shader via TZ (a506_zap).
 
+## GPU rendering of the UI: how CoreAnimation picks a renderer (2026-10-21)
+Static analysis of the iPadOS 16.7.16 SystemOS cryptex (087-86624-047.dmg,
+apfs-fuse; dyld cache tools t290/src/dsc_*.py, no ipsw tool needed):
+- `CA::WindowServer::AppleDisplay::new_server()` always builds an
+  `EAGLServer(IOMFBDisplay*, name)` for the main display (our AppleCLCD).
+- `EAGLServer::renderer()` (0x18826af3c): Metal device -> MetalContext;
+  **no Metal and CA_ENABLE_OGL (default 1, read once in the EAGLServer ctor)
+  -> `[[EAGLContext alloc] initWithAPI:3]`, then API 2, -> GLES renderer**;
+  only if no EAGLContext -> software (today's path).
+- Renderer table in __DATA_CONST 0x1d57e7c68: gles_new_context,
+  metal_new_context, sw_new_context; GLES context = CA::OGL::GLESContext.
+- OpenGLES.framework on iOS 16 renders through AppleMetalGLRenderer (GL on
+  Metal), so EAGLContext fails without a Metal device.
+**Plan:** a working EAGLContext + GLES 2/3 in backboardd is enough for CA to
+render the UI on the GPU. Pieces: (1) kernel: IOKit user client for GPU
+memory (alloc/map), command submission and fences (kgsl-like) on top of
+sweet_t290_gpu.c; (2) Mesa Freedreno (gallium a5xx, GLES 3.1) built for
+iOS arm64 with a winsys over (1); (3) a dylib injected into backboardd that
+interposes the OpenGLES C API and EAGLContext (initWithAPI, setCurrentContext,
+renderbufferStorage:fromDrawable:, IOSurface textures) with Mesa's.
+Next research: which OpenGLES/EAGL symbols QuartzCore imports (the surface
+to interpose).
+
 ## SOLVED 2026-10-21 (gpu21): the GPU runs commands on bare metal
 **The green square was drawn by the CP** (rptr = wptr = 0x1e81, splash pixel
 00ff0000, RBBM_STATUS 1, no SMMU fault). The missing piece were two GPU clocks
