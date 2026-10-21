@@ -1,0 +1,150 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index d23a1bc..b040388 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -142,6 +142,10 @@ public:
+ 	IOBufferMemoryDescriptor *fShadow;
+ 	bool t290Setup(void);
+ 	void t290Panel(void);
++	void t290Convert(uintptr_t pix, uint32_t rowBytes);
++	bool t290Direct(const uint8_t *rec);
++	uint64_t      fStatT0, fStatConv;     /* SwapEnd presentation stats */
++	uint32_t      fStatFrames;
+ #endif
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+@@ -338,6 +342,16 @@ static uint64_t sweet_fb_swap_count;
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
++#if defined(SWEET_T290)
++	/* native: show it now, before CA may draw into this surface again */
++	if (fT290 && fNative && !fPowerOff && t290Direct(rec)) {
++		IOLockLock(fLock);
++		memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);  /* for a redraw after display on */
++		IOLockUnlock(fLock);
++		++sweet_fb_swap_count;
++		return;
++	}
++#endif
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
+@@ -493,6 +507,93 @@ AppleCLCD::t290Setup(void)
+ 	return true;
+ }
+ 
++/*
++ * Native: a BGRA picture of panel size -> panel bytes R,B,G, 4 pixels per
++ * 3 words. Screen x >= shift lives at buffer x - shift on the same row,
++ * screen x < shift wraps to the end of the row above: two runs per row.
++ */
++static inline uint32_t
++t290_rbg(uint32_t p)
++{
++	return ((p >> 16) & 0xff) | (p & 0xff) << 8 | ((p >> 8) & 0xff) << 16;
++}
++
++void
++AppleCLCD::t290Convert(uintptr_t pix, uint32_t rowBytes)
++{
++	uint32_t n = fPanelW * 3, sh = fPanelShift * 3;
++	for (uint32_t y = 0; y < fPanelH; y++) {
++		const uint32_t *src = (const uint32_t *)(pix + (uint64_t)y * rowBytes);
++		uint32_t *t = (uint32_t *)fRowBuf;
++		for (uint32_t x = 0; x + 4 <= fPanelW; x += 4, src += 4, t += 3) {
++			uint32_t c0 = t290_rbg(src[0]), c1 = t290_rbg(src[1]);
++			uint32_t c2 = t290_rbg(src[2]), c3 = t290_rbg(src[3]);
++			t[0] = c0 | c1 << 24;
++			t[1] = c1 >> 8 | c2 << 16;
++			t[2] = c2 >> 16 | c3 << 8;
++		}
++		uint8_t *row = (uint8_t *)(fPanel + (uint64_t)y * fPanelRow);
++		bcopy(fRowBuf + sh, row, n - sh);
++		if (y > 0 && sh != 0) {
++			bcopy(fRowBuf, row - fPanelRow + (n - sh), sh);
++		}
++	}
++}
++
++/* SwapEnd with one full-screen BGRA layer (native mode): straight to the panel. */
++bool
++AppleCLCD::t290Direct(const uint8_t *rec)
++{
++	uint32_t mask = get32(rec, 0x104);
++	int layer = -1;
++	for (int l = 0; l < SWEET_FB_LAYERS; l++) {
++		if ((mask & (1u << l)) && get32(rec, 0x54 + 4 * l) != 0) {
++			if (layer >= 0) {
++				return false;           /* several layers: the general path */
++			}
++			layer = l;
++		}
++	}
++	if (layer < 0) {
++		return false;
++	}
++	const uint8_t *a = rec + 0x64 + 16 * layer;
++	const uint8_t *b = rec + 0xc4 + 16 * layer;
++	if (get32(a, 0) || get32(a, 4) || get32(b, 0) || get32(b, 4) ||
++	    get32(b, 8) != fPanelW || get32(b, 12) != fPanelH) {
++		return false;
++	}
++	SweetSurface *sf = sweet_surface_copy(get32(rec, 0x54 + 4 * layer));
++	if (sf == NULL) {
++		return false;
++	}
++	bool ok = sf != fSurface && sf->memory != NULL && sf->elementWidth == 1 &&
++	    sf->elementHeight == 1 && (sf->bytesPerElement == 0 || sf->bytesPerElement == 4) &&
++	    sf->width >= fPanelW && sf->height >= fPanelH &&
++	    (uint64_t)sf->offset + (uint64_t)(fPanelH - 1) * sf->bytesPerRow + fPanelW * 4 <=
++	    sf->memory->getLength();
++	if (ok) {
++		uint64_t t0 = mach_absolute_time();
++		t290Convert(sf->kernelAddress() + sf->offset, sf->bytesPerRow);
++		uint64_t t1 = mach_absolute_time();
++		fStatConv += t1 - t0;
++		if (fStatFrames++ == 0) {
++			fStatT0 = t0;
++		} else if (fStatFrames == 600) {
++			uint64_t all, conv;
++			absolutetime_to_nanoseconds(t1 - fStatT0, &all);
++			absolutetime_to_nanoseconds(fStatConv, &conv);
++			IOLog("SWEET FB: %llu.%llu fps (600 frames), convert %llu us per frame\n",
++			    599ULL * 1000000000ULL / all, (5990ULL * 1000000000ULL / all) % 10,
++			    conv / 600 / 1000);
++			fStatFrames = 0;
++			fStatConv = 0;
++		}
++	}
++	sf->release();
++	return ok;
++}
++
+ /* Shadow (BGRA) -> panel: 1/2 nearest, centred, bytes R,B,G, scan-out shift. */
+ void
+ AppleCLCD::t290Panel(void)
+@@ -502,22 +603,7 @@ AppleCLCD::t290Panel(void)
+ 		 * 1:1. Screen x >= shift lives at buffer x - shift on the same row,
+ 		 * screen x < shift wraps to the end of the row above: two runs.
+ 		 */
+-		uint32_t n = fPanelW * 3, sh = fPanelShift * 3;
+-		for (uint32_t y = 0; y < fPanelH; y++) {
+-			const uint32_t *src = (const uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
+-			uint8_t *t = fRowBuf;
+-			for (uint32_t x = 0; x < fPanelW; x++, t += 3) {
+-				uint32_t v = src[x];
+-				t[0] = (uint8_t)(v >> 16);      /* R */
+-				t[1] = (uint8_t)v;              /* B */
+-				t[2] = (uint8_t)(v >> 8);       /* G */
+-			}
+-			uint8_t *row = (uint8_t *)(fPanel + (uint64_t)y * fPanelRow);
+-			bcopy(fRowBuf + sh, row, n - sh);
+-			if (y > 0 && sh != 0) {
+-				bcopy(fRowBuf, row - fPanelRow + (n - sh), sh);
+-			}
+-		}
++		t290Convert(fPixels, fRowBytes);
+ 		return;
+ 	}
+ 	uint32_t outW = fWidth / 2, outH = fHeight / 2;
