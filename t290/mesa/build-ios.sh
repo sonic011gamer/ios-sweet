@@ -34,6 +34,7 @@ meson setup build --cross-file "$here/cross-ios.txt" \
 	-Dosmesa=true -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled \
 	-Dxmlconfig=disabled -Dzstd=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
 	-Dbuild-tests=false -Dtools=
+ninja -C build src/compiler/spirv/spirv_info.h src/compiler/spirv/vtn_generator_ids.h > /dev/null 2>&1 || true
 ninja -C build -k 0 \
 	src/freedreno/drm/libfreedreno_drm.a \
 	src/gallium/drivers/freedreno/libfreedreno.a \
