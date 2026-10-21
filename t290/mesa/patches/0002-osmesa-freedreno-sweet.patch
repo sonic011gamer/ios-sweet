@@ -1,6 +1,6 @@
 diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
 --- a/src/gallium/targets/osmesa/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:33:13.567964711 +0800
++++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:36:27.479664989 +0800
 @@ -4,6 +4,17 @@
  osmesa_link_with = []
  osmesa_link_args = []
@@ -44,8 +44,8 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
    soversion : host_machine.system() == 'windows' ? '' : '8',
 diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
 --- a/src/gallium/targets/osmesa/osmesa_target.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:33:13.157434728 +0800
-@@ -26,6 +26,33 @@
++++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:36:27.479865415 +0800
+@@ -26,6 +26,47 @@
  
  #include "sw/null/null_sw_winsys.h"
  
@@ -58,6 +58,20 @@ diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osm
 +#include "util/u_inlines.h"
 +#include "freedreno/freedreno_screen.h"
 +#include "freedreno/drm/freedreno_drmif.h"
++
++/* no KMS display on iOS: freedreno only calls these with a renderonly object */
++#include "renderonly/renderonly.h"
++struct renderonly_scanout *
++renderonly_create_gpu_import_for_resource(struct pipe_resource *rsc, struct renderonly *ro,
++                                          struct winsys_handle *out_handle)
++{
++   return NULL;
++}
++
++void
++renderonly_scanout_destroy(struct renderonly_scanout *scanout, struct renderonly *ro)
++{
++}
 +
 +static const driOptionDescription t290_fd_options[] = {
 +#include "pipe-loader/driinfo_gallium.h"
@@ -79,7 +93,7 @@ diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osm
  
  struct pipe_screen *
  osmesa_create_screen(void);
-@@ -37,6 +64,14 @@
+@@ -37,6 +78,14 @@
     struct sw_winsys *winsys;
     struct pipe_screen *screen;
  

@@ -97,3 +97,19 @@ edit('src/gallium/targets/osmesa/meson.build', '''    inc_gallium_drivers,
   ],''', '''    inc_gallium_drivers, osmesa_incs,
   ],''')
 print('ok 0002 incs')
+edit('src/gallium/targets/osmesa/osmesa_target.c', '''static const driOptionDescription t290_fd_options[] = {''', '''/* no KMS display on iOS: freedreno only calls these with a renderonly object */
+#include "renderonly/renderonly.h"
+struct renderonly_scanout *
+renderonly_create_gpu_import_for_resource(struct pipe_resource *rsc, struct renderonly *ro,
+                                          struct winsys_handle *out_handle)
+{
+   return NULL;
+}
+
+void
+renderonly_scanout_destroy(struct renderonly_scanout *scanout, struct renderonly *ro)
+{
+}
+
+static const driOptionDescription t290_fd_options[] = {''')
+print('ok 0002 renderonly')
