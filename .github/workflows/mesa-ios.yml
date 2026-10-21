@@ -36,3 +36,38 @@ jobs:
             mesa-work/mesa-24.2.8/build/src/gallium/drivers/freedreno/*.a
             mesa-work/mesa-24.2.8/build/src/mesa/*.a
             mesa-work/out
+
+  # The same Mesa built for macOS arm64 with a fake SweetGPU (SWEET_FAKE=1):
+  # glprobe runs Mesa's CPU side here, no tablet reboots needed.
+  mac-fake:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          python3 -m pip install --break-system-packages meson==1.5.2 mako pyyaml packaging || \
+            python3 -m pip install meson==1.5.2 mako pyyaml packaging
+          brew install ninja bison flex || true
+          echo "/opt/homebrew/opt/bison/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
+      - name: Build
+        run: |
+          TARGET=mac WORK=$PWD/mesa-work bash t290/mesa/build-ios.sh
+      - name: Run glprobe (fake GPU)
+        run: |
+          cd mesa-work/out
+          export GLPROBE_LIB=$PWD/libOSMesa.8.dylib SWEET_FAKE=1
+          set +e
+          perl -e 'alarm 240; exec @ARGV' ./glprobe; echo "glprobe exit $?"
+          echo "=== glprobe.log"; cat /private/var/tmp/glprobe.log
+          echo "=== lldb"
+          perl -e 'alarm 300; exec @ARGV' lldb -b -o run -k "thread backtrace all" -k quit ./glprobe 2>&1 | tail -150
+          true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesa-mac
+          path: |
+            mesa-work/build.log
+            mesa-work/out
+            /private/var/tmp/glprobe.log

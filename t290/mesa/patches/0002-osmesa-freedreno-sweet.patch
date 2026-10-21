@@ -1,6 +1,6 @@
 diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
 --- a/src/gallium/targets/osmesa/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:36:27.479664989 +0800
++++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 22:30:22.963143545 +0800
 @@ -4,6 +4,17 @@
  osmesa_link_with = []
  osmesa_link_args = []
@@ -44,13 +44,14 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
    soversion : host_machine.system() == 'windows' ? '' : '8',
 diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
 --- a/src/gallium/targets/osmesa/osmesa_target.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:36:27.479865415 +0800
-@@ -26,6 +26,47 @@
++++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 22:30:22.963299943 +0800
+@@ -26,6 +26,48 @@
  
  #include "sw/null/null_sw_winsys.h"
  
 +#ifdef T290_SWEET
 +/* SM-T290 iPadOS: Freedreno on the SweetGPU user client (t290/mesa) */
++#include <stdio.h>
 +#include <stdlib.h>
 +#include "util/driconf.h"
 +#include "util/xmlconfig.h"
@@ -93,7 +94,7 @@ diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osm
  
  struct pipe_screen *
  osmesa_create_screen(void);
-@@ -37,6 +78,14 @@
+@@ -37,6 +79,15 @@
     struct sw_winsys *winsys;
     struct pipe_screen *screen;
  
@@ -102,6 +103,7 @@ diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osm
 +      screen = t290_freedreno_screen();
 +      if (screen)
 +         return debug_screen_wrap(screen);
++      fprintf(stderr, "T290: Freedreno screen failed, falling back to softpipe\n");
 +   }
 +#endif
 +

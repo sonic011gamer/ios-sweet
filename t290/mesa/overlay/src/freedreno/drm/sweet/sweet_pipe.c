@@ -82,7 +82,7 @@ flush_submit_list(struct list_head *submit_list)
          };
          uint32_t n = 1;
          kern_return_t kr =
-            IOConnectCallScalarMethod(sd->conn, SWEET_GPU_SUBMIT, in, 2, &seq, &n);
+            sweet_call(sd->conn, SWEET_GPU_SUBMIT, in, 2, &seq, &n);
          if (kr) {
             ERROR_MSG("submit failed: %#x", kr);
             ret = -EIO;

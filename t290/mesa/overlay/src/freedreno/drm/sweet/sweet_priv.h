@@ -60,6 +60,18 @@ struct sweet_bo {
 };
 FD_DEFINE_CAST(fd_bo, sweet_bo);
 
+/*
+ * SweetGPU calls go through these: with SWEET_FAKE=1 in the environment
+ * there is no IOKit service, a fake device answers instead (buffers in
+ * process memory, submits complete at once) so the CPU side of Mesa can
+ * run and be debugged on a Mac.
+ */
+#define SWEET_FAKE_CONN ((io_connect_t)0x5eed)
+kern_return_t sweet_call(io_connect_t c, uint32_t sel, const uint64_t *in, uint32_t nin,
+                         uint64_t *out, uint32_t *nout);
+kern_return_t sweet_map(io_connect_t c, uint32_t handle, mach_vm_address_t *addr);
+void sweet_unmap(io_connect_t c, uint32_t handle, mach_vm_address_t addr);
+
 struct fd_device *sweet_device_new(void);
 struct fd_bo *sweet_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags);
 struct fd_bo *sweet_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle);

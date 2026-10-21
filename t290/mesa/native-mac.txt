@@ -1,0 +1,3 @@
+# meson native file: macOS arm64 test build of the same Mesa (SWEET_FAKE runs in CI)
+[binaries]
+pkg-config = 'false'

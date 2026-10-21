@@ -16,9 +16,7 @@ sweet_bo_map(struct fd_bo *bo)
 {
    struct sweet_device *sd = to_sweet_device(bo->dev);
    mach_vm_address_t addr = 0;
-   mach_vm_size_t size = 0;
-   kern_return_t kr = IOConnectMapMemory64(sd->conn, bo->handle, mach_task_self(), &addr, &size,
-                                           1 /* kIOMapAnywhere */);
+   kern_return_t kr = sweet_map(sd->conn, bo->handle, &addr);
    if (kr) {
       ERROR_MSG("map of bo %u failed: %#x", bo->handle, kr);
       return NULL;
@@ -40,7 +38,7 @@ sweet_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
    if (op & FD_BO_PREP_NOSYNC) {
       uint64_t done = 0;
       uint32_t n = 1;
-      IOConnectCallScalarMethod(sd->conn, SWEET_GPU_FENCE, NULL, 0, &done, &n);
+      sweet_call(sd->conn, SWEET_GPU_FENCE, NULL, 0, &done, &n);
       return fd_fence_before((uint32_t)done, seq) ? -EBUSY : 0;
    }
    return sweet_wait_seq(bo->dev, seq, 5000000000ull);
@@ -68,8 +66,7 @@ sweet_bo_destroy(struct fd_bo *bo)
 {
    struct sweet_device *sd = to_sweet_device(bo->dev);
    if (bo->map) {
-      IOConnectUnmapMemory64(sd->conn, bo->handle, mach_task_self(),
-                             (mach_vm_address_t)(uintptr_t)bo->map);
+      sweet_unmap(sd->conn, bo->handle, (mach_vm_address_t)(uintptr_t)bo->map);
       bo->map = NULL;
    }
    fd_bo_fini_common(bo);
@@ -90,7 +87,7 @@ sweet_bo_close_handle(struct fd_bo *bo)
 {
    struct sweet_device *sd = to_sweet_device(bo->dev);
    uint64_t h = bo->handle;
-   IOConnectCallScalarMethod(sd->conn, SWEET_GPU_FREE, &h, 1, NULL, NULL);
+   sweet_call(sd->conn, SWEET_GPU_FREE, &h, 1, NULL, NULL);
 }
 
 static struct fd_bo *
@@ -114,7 +111,7 @@ sweet_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
    struct sweet_device *sd = to_sweet_device(dev);
    uint64_t in = size, out[3] = {0};
    uint32_t n = 3;
-   kern_return_t kr = IOConnectCallScalarMethod(sd->conn, SWEET_GPU_ALLOC, &in, 1, out, &n);
+   kern_return_t kr = sweet_call(sd->conn, SWEET_GPU_ALLOC, &in, 1, out, &n);
    if (kr) {
       ERROR_MSG("alloc of %u bytes failed: %#x", size, kr);
       return NULL;

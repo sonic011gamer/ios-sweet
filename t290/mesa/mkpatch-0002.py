@@ -20,6 +20,7 @@ edit('src/gallium/targets/osmesa/osmesa_target.c', '''#include "sw/null/null_sw_
 
 #ifdef T290_SWEET
 /* SM-T290 iPadOS: Freedreno on the SweetGPU user client (t290/mesa) */
+#include <stdio.h>
 #include <stdlib.h>
 #include "util/driconf.h"
 #include "util/xmlconfig.h"
@@ -55,6 +56,7 @@ edit('src/gallium/targets/osmesa/osmesa_target.c', '''   struct sw_winsys *winsy
       screen = t290_freedreno_screen();
       if (screen)
          return debug_screen_wrap(screen);
+      fprintf(stderr, "T290: Freedreno screen failed, falling back to softpipe\\n");
    }
 #endif
 ''')

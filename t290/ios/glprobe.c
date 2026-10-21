@@ -154,7 +154,8 @@ main(void)
 	setenv("FD_MESA_DEBUG", "msgs", 1);
 	setenv("MESA_LOG_FILE", "/private/var/tmp/mesa.log", 1);
 	STEP("dlopen");
-	void *h = dlopen("/usr/lib/libOSMesa.8.dylib", RTLD_NOW | RTLD_LOCAL);
+	const char *lib = getenv("GLPROBE_LIB"); /* Mac test runs in t290/mesa CI */
+	void *h = dlopen(lib ? lib : "/usr/lib/libOSMesa.8.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!h) {
 		mark("glprobe: dlopen failed: %s", dlerror());
 		return 1;
