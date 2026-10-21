@@ -1,0 +1,35 @@
+name: ios-tools
+
+# iOS arm64 command-line tools for the SM-T290 port (t290/ios/*.c), ad-hoc
+# signed with t290/ios/ent.plist (the port's AMFI is permissive). Copy them
+# onto the iPadOS root with t290/tools/t290-xfer.ps1.
+on:
+  workflow_dispatch:
+  push:
+    branches: [t290]
+    paths:
+      - "t290/ios/**"
+      - ".github/workflows/ios-tools.yml"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          xcrun --sdk iphoneos --show-sdk-version
+          for f in t290/ios/*.c; do
+            n=$(basename "$f" .c)
+            xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall \
+              -o "out/$n" "$f" -framework IOKit -framework CoreFoundation
+            codesign -s - -f --entitlements t290/ios/ent.plist "out/$n"
+            file "out/$n"
+          done
+          shasum -a 256 out/* | tee out/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-tools
+          path: out
