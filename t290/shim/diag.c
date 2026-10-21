@@ -2234,7 +2234,7 @@ static void boot_android(void)
  * each on the A53) timed against the 19.2 MHz counter, with the I-cache on
  * so the loop does not run from uncached DRAM.
  */
-static __attribute__((unused)) uint32_t cpu_mhz(void)
+static uint32_t cpu_mhz(void)
 {
 	uint64_t sctlr = rsr("sctlr_el1");
 	__asm__ volatile("msr sctlr_el1, %0; isb" :: "r"(sctlr | 1U << 12));
@@ -2255,7 +2255,7 @@ static __attribute__((unused)) uint32_t cpu_mhz(void)
  * Linux clk-smd-rpm msm8937: bimc = MEM_CLK "clk2" id 0, snoc = BUS_CLK
  * "clk1" id 1; rates in KHz, the RPM rounds to a supported level.
  */
-static __attribute__((unused)) void perf_votes(void)
+static void perf_votes(void)
 {
 	static const uint32_t bimc[] = { 0x007a484b /* "KHz" */, 800000 };
 	static const uint32_t snoc[] = { 0x007a484b, 400000 };
@@ -2331,7 +2331,7 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	set_btn(&again[0], 16, 1150, 380, 114, "Log", GREY);
 	set_btn(&again[1], 404, 1150, 380, 114, "Back", IOSBLUE);
 	STEP("menu");
-#if defined(T290_MENU_EXTRAS)
+#if defined(T290_AUTO)
 	if (auto_command()) {
 		con_clear(DARK);
 		con_str("AUTO", "GPU diagnostics, then Android");
@@ -2355,13 +2355,13 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 		char run[] = "run 0000";
 		fmt_hex(run + 4, runs, 4);
 		text_at(50, 1200, run, GREY, DARK, 2);
-#if defined(T290_MENU_EXTRAS)
 		char mhz[] = "CPU 0000 MHz";
 		uint32_t m = cpu_mhz();
 		for (int i = 3; i >= 0; i--, m /= 10)
 			mhz[4 + i] = (char)('0' + m % 10);
 		text_at(330, 1200, mhz, GREY, DARK, 2);
-#endif
+		plog_str(mhz);
+		plog_putc('\n');
 		int k = wait_tap(menu, 4);
 		if (k == 0)
 			break;
@@ -2388,9 +2388,7 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	gpu_probe();
 	con_hex3("GPUBOOT", "ready=", (uint32_t)gpu_ready, 0, 0, 0, 0);
 #endif
-#if defined(T290_MENU_EXTRAS)
 	perf_votes();
-#endif
 	(void)dtb;
 }
 

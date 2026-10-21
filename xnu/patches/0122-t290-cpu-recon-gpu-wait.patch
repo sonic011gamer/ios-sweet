@@ -1,0 +1,66 @@
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index f1778fa..36b7993 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -54,6 +54,32 @@ keys_thread(void *arg, wait_result_t result)
+ 	bool pok = spmi && !sweet_spmi_read(0, 0x0810, &pon);
+ 	printf("SWEET KEYS: T290 spmi=%d pon=%#x/%d gpio91=%#x\n", spmi, pon, pok,
+ 	    *(volatile uint32_t *)(keys_gpio + 4));
++	{
++		/*
++		 * Read-only CPU clock + APC rail report (the CPU runs ~720 MHz as
++		 * LK left it, t290 menu). APCS c1 RCG CMD/CFG at 0xb011050, A53 PLL
++		 * (gcc apcs_c1_base) at 0xb016000, PM8953 S5 (SID 1, 0x2000).
++		 */
++		vm_offset_t rcg = ml_io_map(0x0b011000u, 0x1000);
++		vm_offset_t pll = ml_io_map(0x0b016000u, 0x1000);
++		if (rcg && pll) {
++			volatile uint32_t *r = (volatile uint32_t *)(rcg + 0x50);
++			volatile uint32_t *p = (volatile uint32_t *)pll;
++			printf("SWEET CPUCLK: rcg cmd=%#x cfg=%#x pll %#x %#x %#x %#x %#x %#x %#x %#x\n",
++			    r[0], r[1], p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
++		}
++		uint8_t v[16];
++		static const uint8_t regs[16] = { 0x04, 0x05, 0x08, 0x09, 0x40, 0x41, 0x42, 0x43,
++			                          0x44, 0x45, 0x46, 0x60, 0x68, 0x70, 0x71, 0x72 };
++		for (int i = 0; i < 16; i++) {
++			v[i] = 0xee;
++			(void)sweet_spmi_read(1, 0x2000u | regs[i], &v[i]);
++		}
++		printf("SWEET APC S5: type %02x sub %02x st %02x %02x vset %02x %02x %02x %02x %02x %02x %02x "
++		    "pd %02x mode %02x avs %02x %02x %02x\n",
++		    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10],
++		    v[11], v[12], v[13], v[14], v[15]);
++	}
+ 	for (;;) {
+ 		pon = 0;
+ 		pok = spmi && !sweet_spmi_read(0, 0x0810, &pon);
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 9551d65..3855850 100755
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -142,6 +142,9 @@ sp_allowed(unsigned sid, unsigned peripheral)
+ 	if (sid == 0 && peripheral == 0x08) {	/* PM8953 PON: power + volume-down */
+ 		return true;
+ 	}
++	if (sid == 1 && peripheral == 0x20) {	/* PM8953 S5: APC (CPU) rail, read only */
++		return true;
++	}
+ #endif
+ 	return false;
+ }
+diff --git a/bsd/dev/sweet_t290_gpu.c b/bsd/dev/sweet_t290_gpu.c
+index 11ae734..7e5ccee 100755
+--- a/bsd/dev/sweet_t290_gpu.c
++++ b/bsd/dev/sweet_t290_gpu.c
+@@ -130,6 +130,10 @@ sweet_t290_gpu_init(void)
+ 	ring_out(0);
+ 	ring_out(0xc0ffee01);
+ 	bool done = ring_kick_wait(100000);
++	/* rptr moves when the CP fetches; the write itself lands a little later */
++	for (unsigned us = 0; done && scratch[0] != 0xc0ffee01 && us < 100000; us += 10) {
++		delay(10);
++	}
+ 	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+ 	gpu_up = done && scratch[0] == 0xc0ffee01;
+ 	printf("SWEET GPU: Adreno 504 ring %#x (%u dwords), CP_MEM_WRITE %s in %llu us "
