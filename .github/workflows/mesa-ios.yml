@@ -18,7 +18,9 @@ jobs:
         run: |
           python3 -m pip install --break-system-packages meson==1.5.2 mako pyyaml packaging || \
             python3 -m pip install meson==1.5.2 mako pyyaml packaging
-          brew install ninja || true
+          brew install ninja bison flex || true
+          echo "/opt/homebrew/opt/bison/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
           meson --version; ninja --version
       - name: Build
         run: |

@@ -1,23 +1,25 @@
 diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
 --- a/src/gallium/targets/osmesa/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:24:28.172671927 +0800
-@@ -4,6 +4,15 @@
++++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 19:29:26.520193303 +0800
+@@ -4,6 +4,17 @@
  osmesa_link_with = []
  osmesa_link_args = []
  osmesa_link_deps = []
 +osmesa_c_args = []
 +osmesa_deps = []
++osmesa_incs = []
 +
 +# SM-T290 iPadOS: Freedreno on SweetGPU (t290/mesa)
 +if host_machine.system() == 'darwin' and with_gallium_freedreno
 +  osmesa_c_args += '-DT290_SWEET'
++  osmesa_incs += inc_freedreno
 +  osmesa_deps += driver_freedreno
 +  osmesa_link_args += ['-framework', 'IOKit', '-framework', 'CoreFoundation']
 +endif
  
  if with_shared_glapi
    osmesa_link_with += libglapi
-@@ -25,6 +34,7 @@
+@@ -25,12 +36,13 @@
  libosmesa = shared_library(
    osmesa_lib_name,
    'osmesa_target.c',
@@ -25,7 +27,14 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
    gnu_symbol_visibility : 'hidden',
    link_args : [ld_args_gc_sections, osmesa_link_args],
    vs_module_defs : osmesa_def,
-@@ -39,6 +49,7 @@
+   include_directories : [
+     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_winsys,
+-    inc_gallium_drivers,
++    inc_gallium_drivers, osmesa_incs,
+   ],
+   link_depends : osmesa_link_deps,
+   link_whole : [libosmesa_st, libglapi_static],
+@@ -39,6 +51,7 @@
    ],
    dependencies : [
      dep_ws2_32, dep_selinux, dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
@@ -35,7 +44,7 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
    soversion : host_machine.system() == 'windows' ? '' : '8',
 diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
 --- a/src/gallium/targets/osmesa/osmesa_target.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:24:28.171290670 +0800
++++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 19:29:25.122921494 +0800
 @@ -26,6 +26,32 @@
  
  #include "sw/null/null_sw_winsys.h"

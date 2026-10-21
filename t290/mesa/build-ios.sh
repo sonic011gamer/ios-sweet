@@ -35,7 +35,7 @@ meson setup build --cross-file "$here/cross-ios.txt" \
 	-Dxmlconfig=disabled -Dzstd=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
 	-Dbuild-tests=false -Dtools=
 ninja -C build src/compiler/spirv/spirv_info.h src/compiler/spirv/vtn_generator_ids.h > /dev/null 2>&1 || true
-ninja -C build -k 0 2>&1 | tee "$work/build.log" | grep -E "error|FAILED" | head -200 || true
+ninja -C build -k 0 src/gallium/targets/osmesa/libOSMesa.8.dylib 2>&1 | tee "$work/build.log" | grep -E "error|FAILED" | head -200 || true
 grep -c "FAILED" "$work/build.log" || true
 
 # OSMesa dylib + the GL test, ad-hoc signed, for /usr/lib/t290 on the tablet

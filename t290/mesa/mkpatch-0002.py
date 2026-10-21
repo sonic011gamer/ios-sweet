@@ -82,3 +82,17 @@ edit('src/gallium/targets/osmesa/meson.build', '''    dep_ws2_32, dep_selinux, d
     osmesa_deps,
   ],''')
 print('ok 0002')
+edit('src/gallium/targets/osmesa/meson.build', '''osmesa_c_args = []
+osmesa_deps = []
+''', '''osmesa_c_args = []
+osmesa_deps = []
+osmesa_incs = []
+''')
+edit('src/gallium/targets/osmesa/meson.build', '''  osmesa_c_args += '-DT290_SWEET'
+''', '''  osmesa_c_args += '-DT290_SWEET'
+  osmesa_incs += inc_freedreno
+''')
+edit('src/gallium/targets/osmesa/meson.build', '''    inc_gallium_drivers,
+  ],''', '''    inc_gallium_drivers, osmesa_incs,
+  ],''')
+print('ok 0002 incs')
