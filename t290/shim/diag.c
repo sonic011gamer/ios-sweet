@@ -2321,13 +2321,124 @@ static __attribute__((unused)) int auto_command(void)
 	return gpu;
 }
 
+/*
+ * ---- CPU at Android's clocks ----
+ * LK leaves the A53 cluster on GPLL0 (APCS c1 RCG 0xb011050 cfg 0x401 =
+ * source 4, /1: 800 MHz) with its own PLL (0xb016000) off and the APC rail
+ * (PM8953 S5, FTS2.5, SID 1 0x2000) at VSET 0x83 = 735 mV (xnu 0122 log).
+ * Android runs up to 2016 MHz with CPR at 890 mV. Here: S5 to the CPR
+ * ceiling of virtual corner 3 (885 mV, qcom,cpr-voltage-ceiling-override),
+ * the A53 PLL to L = 89 (1708.8 MHz, below the mem-acc switch at corner 5),
+ * then the mux to it. FTS2.5 range 0: 80 mV + VSET * 5 mV.
+ */
+#define SPMI_CORE	0x0200f000UL	/* APID -> PPID map at +0x800 */
+#define SPMI_CHNLS	0x02400000UL	/* write channels, 0x8000 per APID (EE 0) */
+#define SPMI_OBS	0x02c00000UL	/* observer (read) channels */
+#define SPMI_CNFG	0x0200a000UL	/* ownership at +0x700 */
+#define APC_S5		0x120		/* PPID: SID 1, peripheral 0x20 */
+#define S5_VSET		0x41
+#define S5_RANGE	0x40
+#define CPU_MV		885
+#define CPU_PLL_L	89		/* x 19.2 MHz = 1708.8 MHz */
+#define APCS_RCG	0x0b011050UL
+#define APCS_PLL	0x0b016000UL
+
+static int spmi_apid(uint32_t ppid)
+{
+	int found = -1;
+	for (int i = 0; i < 256; i++) {
+		uint32_t m = rd32(SPMI_CORE + 0x800 + 4 * i);
+		if (!m || ((m >> 8) & 0xfff) != ppid)
+			continue;
+		if (found < 0 || (rd32(SPMI_CNFG + 0x700 + 4 * i) & 7) == 0)
+			found = i;
+	}
+	return found;
+}
+
+/* one byte; 0 = ok */
+static int spmi_rw(int write, int apid, uint32_t addr, uint8_t *v)
+{
+	uintptr_t ch = (write ? SPMI_CHNLS : SPMI_OBS) + 0x8000UL * (uint32_t)apid;
+	if (write)
+		wr32(ch + 0x10, *v);					/* WDATA0 */
+	wr32(ch, (write ? 0u : 1u) << 27 | (addr & 0xff) << 4);	/* EXT_WRITEL / EXT_READL */
+	for (int i = 0; i < 1000; i++) {
+		uint32_t st = rd32(ch + 0x8);
+		if (st & 1) {
+			if (st & 0xe)
+				return (int)st;
+			if (!write)
+				*v = (uint8_t)rd32(ch + 0x18);
+			return 0;
+		}
+		delay_ms(1);
+	}
+	return -1;
+}
+
+static int cpu_boost(void)
+{
+	STEP("cpu boost spmi");
+	int apid = spmi_apid(APC_S5);
+	uint8_t range = 0xff, vset = 0, owner = 0xff;
+	if (apid >= 0)
+		owner = (uint8_t)(rd32(SPMI_CNFG + 0x700 + 4 * apid) & 7);
+	int e1 = apid < 0 ? -2 : spmi_rw(0, apid, S5_RANGE, &range);
+	int e2 = apid < 0 ? -2 : spmi_rw(0, apid, S5_VSET, &vset);
+	con_hex3("APC", "apid=", (uint32_t)apid, "owner=", owner, "rng/vset=", (uint32_t)range << 8 | vset);
+	if (e1 || e2 || owner != 0 || range != 0 || vset < 0x70 || vset > 0xa1) {
+		con_hex3("APC", "unexpected: e=", (uint32_t)e1 << 16 | (uint32_t)e2, 0, 0, 0, 0);
+		return 0;
+	}
+	STEP("cpu boost voltage");
+	uint8_t want = (CPU_MV - 80) / 5, back = 0;
+	int ew = spmi_rw(1, apid, S5_VSET, &want);
+	delay_ms(5);					/* FTS slew */
+	int er = spmi_rw(0, apid, S5_VSET, &back);
+	con_hex3("APC", "write=", (uint32_t)ew, "vset=", back, "mV=", 80 + 5 * (uint32_t)back);
+	if (ew || er || back != want)
+		return 0;
+
+	STEP("cpu boost pll");
+	if (rd32(APCS_PLL) & 1) {			/* in use already? leave it */
+		con_hex3("CPUPLL", "busy mode=", rd32(APCS_PLL), 0, 0, 0, 0);
+		return 0;
+	}
+	wr32(APCS_PLL, 0);				/* mode: off */
+	wr32(APCS_PLL + 0x4, CPU_PLL_L);		/* L */
+	wr32(APCS_PLL + 0x8, 0);			/* M */
+	wr32(APCS_PLL + 0xc, 1);			/* N */
+	wr32(APCS_PLL, 1U << 2);			/* RESET_N (clk_pll_sr2_enable) */
+	int lock = 0;
+	for (int i = 0; i < 100 && !lock; i++) {
+		lock = (rd32(APCS_PLL + 0x1c) >> 16) & 1;	/* status: LOCK */
+		delay_ms(1);
+	}
+	con_hex3("CPUPLL", "lock=", (uint32_t)lock, "mode=", rd32(APCS_PLL), "l=", rd32(APCS_PLL + 4));
+	if (!lock)
+		return 0;
+	wr32(APCS_PLL, 1U << 2 | 1U);			/* + OUTCTRL */
+
+	STEP("cpu boost mux");
+	uint32_t cfg = rd32(APCS_RCG + 4);
+	wr32(APCS_RCG + 4, (cfg & ~0x71fU) | 5U << 8 | 1);	/* source 5 = A53 PLL, /1 */
+	wr32(APCS_RCG, rd32(APCS_RCG) | 1);			/* UPDATE */
+	for (int i = 0; i < 100 && (rd32(APCS_RCG) & 1); i++)
+		delay_ms(1);
+	con_hex3("CPUMUX", "cmd=", rd32(APCS_RCG), "cfg=", rd32(APCS_RCG + 4), "MHz=", cpu_mhz());
+	return 1;
+}
+
 static void boot_menu(uint64_t dtb, uint32_t runs)
 {
-	struct button menu[4], again[2];
-	set_btn(&menu[0], 50, 260, 700, 180, "iPadOS 16", IOSBLUE);
-	set_btn(&menu[1], 50, 480, 700, 180, "Android", GREEN);
-	set_btn(&menu[2], 50, 700, 700, 150, "GPU diagnostics", GREY);
-	set_btn(&menu[3], 50, 890, 700, 150, "Boot log", GREY);
+	struct button menu[5], again[2];
+	set_btn(&menu[0], 50, 230, 700, 150, "iPadOS 16", IOSBLUE);
+	set_btn(&menu[1], 50, 400, 700, 150, "iPadOS 1.7 GHz", IOSBLUE);
+	set_btn(&menu[2], 50, 570, 700, 150, "Android", GREEN);
+	set_btn(&menu[3], 50, 740, 700, 130, "GPU diagnostics", GREY);
+	set_btn(&menu[4], 50, 890, 700, 130, "Boot log", GREY);
+	int boost = 0;
 	set_btn(&again[0], 16, 1150, 380, 114, "Log", GREY);
 	set_btn(&again[1], 404, 1150, 380, 114, "Back", IOSBLUE);
 	STEP("menu");
@@ -2344,7 +2455,7 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 		con_clear(DARK);
 		text_at(50, 80, "SM-T290", WHITE, DARK, 4);
 		text_at(50, 160, "Choose a system", YELLOW, DARK, 2);
-		for (int i = 0; i < 4; i++)
+		for (int i = 0; i < 5; i++)
 			draw_button(&menu[i], 0);
 		if (!ts_ok) {
 			/* no touch: the menu cannot be used, keep the old behaviour */
@@ -2362,14 +2473,18 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 		text_at(330, 1200, mhz, GREY, DARK, 2);
 		plog_str(mhz);
 		plog_putc('\n');
-		int k = wait_tap(menu, 4);
+		int k = wait_tap(menu, 5);
 		if (k == 0)
 			break;
 		if (k == 1) {
+			boost = 1;
+			break;
+		}
+		if (k == 2) {
 			boot_android();
 			continue;
 		}
-		if (k == 2) {
+		if (k == 3) {
 			con_clear(DARK);
 			con_str("T290", "GPU diagnostics");
 			gpu_probe();
@@ -2389,6 +2504,8 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	con_hex3("GPUBOOT", "ready=", (uint32_t)gpu_ready, 0, 0, 0, 0);
 #endif
 	perf_votes();
+	if (boost && !cpu_boost())
+		con_str("CPU", "boost not applied, staying at 800 MHz");
 	(void)dtb;
 }
 
