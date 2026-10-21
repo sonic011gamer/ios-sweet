@@ -1,0 +1,85 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 76b2973..9551d65 100755
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -28,7 +28,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define SP_OBS_PA   0x02c00000u
+ #define SP_CFG_PA   0x0200a000u
+ #define SP_CORE_SZ  0x1000
+-#define SP_OBS_SZ   0x800000	/* 256 APIDs * 0x8000 */
++#define SP_OBS_SZ   0		/* 256 APIDs * 0x8000 = 8 MiB: one page per used APID instead */
+ #define SP_MAP      0x800u
+ #define SP_STRIDE   0x8000u
+ #define SP_MAX_APID 256u
+@@ -45,6 +45,10 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define SP_NO_APID 0xffffu
+ 
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
++#if defined(SWEET_T290)
++/* the whole observer (8 MiB) would exhaust the 8 MiB io_submap: map lazily */
++static vm_offset_t sp_chan_va[SP_MAX_APID];
++#endif
+ static IOLock *sp_lock;
+ static unsigned sp_count;
+ static volatile SInt32 sp_state;	/* 0 not tried, 1 mapping, 2 done */
+@@ -86,7 +90,11 @@ sp_map(void)
+ 	}
+ 	sp_core = ml_io_map(SP_CORE_PA, SP_CORE_SZ);
+ 	sp_cfg = ml_io_map(SP_CFG_PA, 0x1000);
++#if !defined(SWEET_T290)
+ 	sp_obs = ml_io_map(SP_OBS_PA, SP_OBS_SZ);
++#else
++	sp_obs = 1;	/* see sp_channel() */
++#endif
+ 	if (!sp_core || !sp_cfg || !sp_obs) {
+ 		printf("SWEET SPMI: mapping failed\n");
+ 		return -1;
+@@ -138,6 +146,20 @@ sp_allowed(unsigned sid, unsigned peripheral)
+ 	return false;
+ }
+ 
++/* observer channel registers of one APID (lock held) */
++static vm_offset_t
++sp_channel(uint16_t apid)
++{
++#if defined(SWEET_T290)
++	if (!sp_chan_va[apid]) {
++		sp_chan_va[apid] = ml_io_map(SP_OBS_PA + SP_STRIDE * apid, 0x1000);
++	}
++	return sp_chan_va[apid];
++#else
++	return sp_obs + SP_STRIDE * apid;
++#endif
++}
++
+ int
+ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ {
+@@ -152,19 +174,23 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 		IOLockUnlock(sp_lock);
+ 		return -1;
+ 	}
+-	unsigned off = SP_STRIDE * apid;
++	vm_offset_t ch = sp_channel(apid);
++	if (!ch) {
++		IOLockUnlock(sp_lock);
++		return -1;
++	}
+ 	uint32_t cmd = (1u << 27) | ((addr & 0xffu) << 4);
+ 	__asm__ volatile("dmb oshst" ::: "memory");
+-	*(volatile uint32_t *)(sp_obs + off) = cmd; /* EXT_READL, BC=0 */
++	*(volatile uint32_t *)ch = cmd; /* EXT_READL, BC=0 */
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ 	for (unsigned i = 0; i < 1000; ++i) {
+-		uint32_t status = sp_rd(sp_obs, off + 0x08u);
++		uint32_t status = sp_rd(ch, 0x08u);
+ 		if (status & 1u) {
+ 			if (status & 0x0eu) {
+ 				IOLockUnlock(sp_lock);
+ 				return -1;
+ 			}
+-			*out = (uint8_t)sp_rd(sp_obs, off + 0x18u);
++			*out = (uint8_t)sp_rd(ch, 0x18u);
+ 			IOLockUnlock(sp_lock);
+ 			return 0;
+ 		}
