@@ -7,6 +7,9 @@
 #   t290-xfer.ps1 -Result      -> per-op results, fetched files written locally
 param([string[]]$Put = @(), [string[]]$Get = @(), [switch]$Result)
 $ErrorActionPreference = 'Stop'
+# powershell -File passes "a,b" as one string: split lists ourselves
+$Put = @($Put | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$Get = @($Get | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $adb = 'D:\test1\tools-win\platform-tools\adb.exe'
 $su = '/debug_ramdisk/su'
 $XferLba = 33558528
