@@ -5,6 +5,7 @@
  * an alarm that names the step a hang happened in.
  */
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -40,7 +41,20 @@ static void
 on_alarm(int sig)
 {
 	(void)sig;
-	mark("glprobe: TIMEOUT in step '%s'", step);
+	mark("glprobe: TIMEOUT in step '%s', backtrace:", step);
+	void *bt[64];
+	int n = backtrace(bt, 64);
+	for (int i = 0; i < n; i++) {
+		Dl_info di;
+		if (dladdr(bt[i], &di) && di.dli_fname) {
+			const char *base = strrchr(di.dli_fname, '/');
+			mark("glprobe:   %2d %s+%#lx (%s)", i, base ? base + 1 : di.dli_fname,
+			    (unsigned long)((char *)bt[i] - (char *)di.dli_fbase),
+			    di.dli_sname ? di.dli_sname : "?");
+		} else {
+			mark("glprobe:   %2d %p", i, bt[i]);
+		}
+	}
 	_exit(3);
 }
 
@@ -62,7 +76,7 @@ main(void)
 {
 	logfd = open("/private/var/tmp/glprobe.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	signal(SIGALRM, on_alarm);
-	alarm(60);
+	alarm(40);
 	setenv("FD_MESA_DEBUG", "msgs", 1);
 	setenv("MESA_LOG_FILE", "/private/var/tmp/mesa.log", 1);
 	STEP("dlopen");
