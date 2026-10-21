@@ -1,0 +1,240 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 16ffebe..0c22744 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_vblk.c			standard
+ bsd/dev/sweet_sdhc.c			standard
+ bsd/dev/sweet_t290_touch.c		standard
++bsd/dev/sweet_t290_gpu.c		standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/sweet_sdhc.c b/bsd/dev/sweet_sdhc.c
+index 5bdec28..1347506 100755
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -940,6 +940,8 @@ sweet_sdhc_init(void)
+ 	sweet_t290_touch_init();
+ 	extern void sweet_keys_init(void);              /* bsd/dev/sweet_keys.c */
+ 	sweet_keys_init();
++	extern void sweet_t290_gpu_init(void);          /* bsd/dev/sweet_t290_gpu.c */
++	sweet_t290_gpu_init();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/sweet_t290_gpu.c b/bsd/dev/sweet_t290_gpu.c
+new file mode 100755
+index 0000000..11ae734
+--- /dev/null
++++ b/bsd/dev/sweet_t290_gpu.c
+@@ -0,0 +1,140 @@
++/*
++ * SWEET_BOARD=t290: Adreno 504, first kernel step.
++ *
++ * The shim (t290/shim/diag.c gpu_probe + gpu_hello, t290/GPU.md "SOLVED")
++ * powers the GPU, switches its clocks on (incl. the timer and always-on
++ * branches the CP microcode waits for), maps SMMU context bank 0 1:1 over
++ * DRAM 0x80000000-0xffffffff (AArch32 LPAE), loads the CP microcode, starts
++ * the CP on a 32 KiB ring in the splash reservation (outside xnu's RAM) and
++ * sends CP_ME_INIT; only if the CP took it, the shim adds boot-arg t290gpu=1.
++ *
++ * Here: ring base, size and write pointer come from the GPU's own CP_RB_*
++ * registers; a CP_MEM_WRITE of a marker into the dword after the ring shows
++ * the CP still runs commands under xnu. Without t290gpu=1 the GPU is never
++ * touched: its registers hang the bus while its clocks are off.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_T290)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_t290_gpu_init(void);
++
++#define GPU_REG_PA      0x01c00000UL
++#define GPU_REG_SIZE    0x4000          /* dwords 0x000-0xfff: RBBM, CP */
++#define SPLASH_PA       0x90000000UL    /* the shim keeps its GPU buffers in here */
++#define SPLASH_SIZE     0x01400000UL
++
++#define CP_RB_BASE      0x800
++#define CP_RB_CNTL      0x802
++#define CP_RB_RPTR      0x806
++#define CP_RB_WPTR      0x807
++#define RBBM_STATUS     0x4f5
++#define CP_MEM_WRITE    61
++
++static vm_offset_t gpu_regs, gpu_ring;
++static uint32_t ring_pa, ring_dw, ring_wptr;
++static bool gpu_up;
++
++static uint32_t
++gpu_rd(uint32_t reg)
++{
++	return *(volatile uint32_t *)(gpu_regs + 4 * reg);
++}
++
++static void
++gpu_wr(uint32_t reg, uint32_t v)
++{
++	*(volatile uint32_t *)(gpu_regs + 4 * reg) = v;
++}
++
++static unsigned
++odd_parity(unsigned v)
++{
++	v ^= v >> 16;
++	v ^= v >> 8;
++	v ^= v >> 4;
++	v &= 0xf;
++	return (~0x6996u >> v) & 1;
++}
++
++/* a5xx type-7 packet header (freedreno adreno_pm4 pm4_pkt7_hdr) */
++static uint32_t
++pkt7(unsigned op, unsigned cnt)
++{
++	return 0x70000000u | (cnt & 0x3fff) | (odd_parity(cnt) << 15) |
++	       ((op & 0x7f) << 16) | (odd_parity(op) << 23);
++}
++
++static void
++ring_out(uint32_t v)
++{
++	*(volatile uint32_t *)(gpu_ring + 4 * ring_wptr) = v;
++	ring_wptr = (ring_wptr + 1) % ring_dw;
++}
++
++/* hand the ring to the CP up to ring_wptr; true once it caught up */
++static bool
++ring_kick_wait(unsigned max_us)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++	gpu_wr(CP_RB_WPTR, ring_wptr);
++	for (unsigned us = 0; us < max_us; us += 10) {
++		if (gpu_rd(CP_RB_RPTR) == ring_wptr) {
++			return true;
++		}
++		delay(10);
++	}
++	return false;
++}
++
++void
++sweet_t290_gpu_init(void)
++{
++	int on = 0;
++	if (!PE_parse_boot_argn("t290gpu", &on, sizeof(on)) || !on) {
++		printf("SWEET GPU: not started by the shim (no t290gpu=1), left alone\n");
++		return;
++	}
++	gpu_regs = ml_io_map(GPU_REG_PA, GPU_REG_SIZE);
++	if (!gpu_regs) {
++		printf("SWEET GPU: register mapping failed\n");
++		return;
++	}
++	ring_pa = gpu_rd(CP_RB_BASE);
++	ring_dw = 2u << (gpu_rd(CP_RB_CNTL) & 0x3f);   /* BUFSZ = log2(bytes / 8) */
++	ring_wptr = gpu_rd(CP_RB_WPTR);
++	uint32_t rptr = gpu_rd(CP_RB_RPTR), status = gpu_rd(RBBM_STATUS);
++	if (ring_pa < SPLASH_PA || ring_pa + ring_dw * 4 + 0x1000 > SPLASH_PA + SPLASH_SIZE ||
++	    ring_wptr >= ring_dw || rptr != ring_wptr) {
++		printf("SWEET GPU: unexpected ring state base=%#x dwords=%u rptr=%u wptr=%u status=%#x\n",
++		    ring_pa, ring_dw, rptr, ring_wptr, status);
++		return;
++	}
++	/* the ring and one scratch page right after it, uncached */
++	gpu_ring = ml_io_map(ring_pa, ring_dw * 4 + 0x1000);
++	if (!gpu_ring) {
++		printf("SWEET GPU: ring mapping failed\n");
++		return;
++	}
++	volatile uint32_t *scratch = (volatile uint32_t *)(gpu_ring + ring_dw * 4);
++	uint32_t scratch_pa = ring_pa + ring_dw * 4;
++	scratch[0] = 0;
++
++	uint64_t t0 = mach_absolute_time(), ns;
++	ring_out(pkt7(CP_MEM_WRITE, 3));
++	ring_out(scratch_pa);
++	ring_out(0);
++	ring_out(0xc0ffee01);
++	bool done = ring_kick_wait(100000);
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	gpu_up = done && scratch[0] == 0xc0ffee01;
++	printf("SWEET GPU: Adreno 504 ring %#x (%u dwords), CP_MEM_WRITE %s in %llu us "
++	    "(rptr=%u wptr=%u marker=%#x status=%#x)\n",
++	    ring_pa, ring_dw, gpu_up ? "executed" : "FAILED", ns / 1000,
++	    gpu_rd(CP_RB_RPTR), ring_wptr, scratch[0], gpu_rd(RBBM_STATUS));
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_T290 */
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 148f276..afb4ba1 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -425,6 +425,10 @@ SweetHIDButtons::testFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ }
+ 
++#if defined(SWEET_T290)
++static int sweet_t290_native;   /* boot-arg t290native */
++#endif
++
+ bool
+ SweetHIDTouch::start(IOService *provider)
+ {
+@@ -436,8 +440,10 @@ SweetHIDTouch::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ #if defined(SWEET_T290)
+ 	(void)native;
+-	fLogicalW = 768;        /* the picture on the panel; x, y already relative to it */
+-	fLogicalH = 1024;
++	/* t290native=1: the GUI is the 800x1280 panel itself (SweetFramebuffer) */
++	PE_parse_boot_argn("t290native", &sweet_t290_native, sizeof(sweet_t290_native));
++	fLogicalW = sweet_t290_native ? 800 : 768;  /* x, y already relative to the picture */
++	fLogicalH = sweet_t290_native ? 1280 : 1024;
+ 	fOffX = 0;
+ 	fOffY = 0;
+ #else
+@@ -449,9 +455,9 @@ SweetHIDTouch::start(IOService *provider)
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ #if defined(SWEET_T290)
+-	/* the 768x1024-pixel picture on the 189 ppi panel */
+-	setProperty("SurfaceWidth", (unsigned long long)(103 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(138 << 16), 32);
++	/* the 768x1024-pixel picture (or the whole 800x1280 panel) at 189 ppi */
++	setProperty("SurfaceWidth", (unsigned long long)((sweet_t290_native ? 108 : 103) << 16), 32);
++	setProperty("SurfaceHeight", (unsigned long long)((sweet_t290_native ? 172 : 138) << 16), 32);
+ #else
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+ 	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
+@@ -477,10 +483,12 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	 * SM-T290: 800x1280 panel pixels; the 1536x2048 iPad display is shown
+ 	 * halved, centred at (16, 128) (SweetFramebuffer.cpp t290Panel).
+ 	 */
+-	x -= 16;
+-	y -= 128;
+-	x = x < 0 ? 0 : (x > 767 ? 767 : x);
+-	y = y < 0 ? 0 : (y > 1023 ? 1023 : y);
++	if (!sweet_t290_native) {
++		x -= 16;
++		y -= 128;
++	}
++	x = x < 0 ? 0 : (x > (int)fLogicalW - 1 ? (int)fLogicalW - 1 : x);
++	y = y < 0 ? 0 : (y > (int)fLogicalH - 1 ? (int)fLogicalH - 1 : y);
+ #else
+ 	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+ 	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
+@@ -498,8 +506,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	}
+ 	if (!was && down) {
+ #if defined(SWEET_T290)
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX / 2 || x > 767 - SWEET_TOUCH_EDGE_PX / 2 ||
+-		    y < SWEET_TOUCH_EDGE_PX / 2 || y > 1023 - SWEET_TOUCH_EDGE_PX / 2;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX / 2 || x > (int)fLogicalW - 1 - SWEET_TOUCH_EDGE_PX / 2 ||
++		    y < SWEET_TOUCH_EDGE_PX / 2 || y > (int)fLogicalH - 1 - SWEET_TOUCH_EDGE_PX / 2;
+ #else
+ 		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+ 		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;

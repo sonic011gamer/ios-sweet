@@ -1116,6 +1116,13 @@ static void gpu_kick_wait(const char *what)
 		 "status=", gpu_rd(A5XX_RBBM_STATUS));
 }
 
+/*
+ * gpu_boot = 1: bring the GPU up for xnu only (no square, no BIMC/regdump);
+ * gpu_ready says whether the CP consumed CP_ME_INIT. xnu's
+ * bsd/dev/sweet_t290_gpu.c then continues on the same ring (boot-arg t290gpu=1).
+ */
+static int gpu_boot, gpu_ready;
+
 static void gpu_hello(void)
 {
 	/*
@@ -1219,7 +1226,7 @@ static void gpu_hello(void)
 	 * Port 0 (apps, works) for comparison; then BKE (bandwidth keeper) off.
 	 */
 	STEP("gpu2 bimc read");
-	{
+	if (!gpu_boot) {
 		static const uint16_t off[] = { 0x000, 0x200, 0x210, 0x230, 0x240, 0x250, 0x300, 0x310, 0x320, 0x330 };
 		for (unsigned port = 0; port <= 2; port += 2) {
 			uintptr_t m = 0x00400000UL + 0x8000 + 0x4000 * port;
@@ -1374,7 +1381,9 @@ static void gpu_hello(void)
 	ring_out(0);
 	ring_out(0);
 	gpu_kick_wait("MEINIT");
-
+	gpu_ready = gpu_rd(A5XX_CP_RB_RPTR) == ring_n;
+	if (gpu_boot)
+		return;
 
 	/*
 	 * Green square: screen x 301..400 = buffer x 72..171 (229 px shift),
@@ -1991,6 +2000,18 @@ static const char *xnu_boot(uintptr_t dtb)
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
 		ba->CommandLine[i] = p->cmdline[i];
+#if defined(T290_GPU2)
+	if (gpu_ready) {
+		/* the GPU runs our ring: tell bsd/dev/sweet_t290_gpu.c it may touch it */
+		static const char arg[] = " t290gpu=1";
+		int n = 0;
+		while (n < BOOT_LINE_LENGTH && ba->CommandLine[n])
+			n++;
+		if (n + (int)sizeof(arg) <= BOOT_LINE_LENGTH)
+			for (int i = 0; i < (int)sizeof(arg); i++)
+				ba->CommandLine[n + i] = arg[i];
+	}
+#endif
 	ba->memSizeActual = p->mem_size;
 	con_hex3("BOOTARG", "pa=", (uint32_t)ba_pa, "top=", (uint32_t)top, "adt=", (uint32_t)adt_pa);
 
@@ -2362,6 +2383,11 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	}
 	con_clear(DARK);
 	con_str("T290", "booting iPadOS 16");
+#if defined(T290_GPU2)
+	gpu_boot = 1;
+	gpu_probe();
+	con_hex3("GPUBOOT", "ready=", (uint32_t)gpu_ready, 0, 0, 0, 0);
+#endif
 #if defined(T290_MENU_EXTRAS)
 	perf_votes();
 #endif
