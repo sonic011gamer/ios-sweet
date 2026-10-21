@@ -2409,16 +2409,25 @@ static int cpu_boost(void)
 	wr32(APCS_PLL + 0x4, CPU_PLL_L);		/* L */
 	wr32(APCS_PLL + 0x8, 0);			/* M */
 	wr32(APCS_PLL + 0xc, 1);			/* N */
-	wr32(APCS_PLL, 1U << 2);			/* RESET_N (clk_pll_sr2_enable) */
+	/*
+	 * First try (RESET_N only, lock = status bit 16) never locked. Qualcomm's
+	 * local_pll_clk_enable: BYPASSNL, 5 us, RESET_N, wait for the lock bit
+	 * (sdm429 apcs_c1_pll lock_mask BIT(31) in STATUS; accept bit 16 too).
+	 */
+	wr32(APCS_PLL, 1U << 1);			/* BYPASSNL */
+	delay_ms(1);
+	wr32(APCS_PLL, 1U << 1 | 1U << 2);		/* + RESET_N */
 	int lock = 0;
+	uint32_t st = 0;
 	for (int i = 0; i < 100 && !lock; i++) {
-		lock = (rd32(APCS_PLL + 0x1c) >> 16) & 1;	/* status: LOCK */
+		st = rd32(APCS_PLL + 0x1c);
+		lock = (st >> 31) & 1 || (st >> 16) & 1;
 		delay_ms(1);
 	}
-	con_hex3("CPUPLL", "lock=", (uint32_t)lock, "mode=", rd32(APCS_PLL), "l=", rd32(APCS_PLL + 4));
+	con_hex3("CPUPLL", "lock=", (uint32_t)lock, "mode=", rd32(APCS_PLL), "status=", st);
 	if (!lock)
 		return 0;
-	wr32(APCS_PLL, 1U << 2 | 1U);			/* + OUTCTRL */
+	wr32(APCS_PLL, 1U << 1 | 1U << 2 | 1U);	/* + OUTCTRL */
 
 	STEP("cpu boost mux");
 	uint32_t cfg = rd32(APCS_RCG + 4);
