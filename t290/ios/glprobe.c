@@ -2,11 +2,15 @@
  * glprobe: step-by-step check of Mesa Freedreno (libOSMesa, t290/mesa) on
  * iPadOS without linking it: dlopen + dlsym, a mark after every step on
  * /dev/console (stdout) and in /private/var/tmp/glprobe.log (fsync'ed), and
- * an alarm that names the step a hang happened in.
+ * an alarm that names the step a hang happened in. From 8 s on a watchdog
+ * thread samples the main thread every 2 s (pc/lr, frame chain, run state,
+ * CPU time) to tell a spin from a sleep in the kernel.
  */
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <mach/mach.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -58,6 +62,54 @@ on_alarm(int sig)
 	_exit(3);
 }
 
+static thread_t main_thread;
+
+static void
+where(const char *tag, uint64_t a)
+{
+	Dl_info di;
+	if (a && dladdr((void *)(uintptr_t)a, &di) && di.dli_fname) {
+		const char *base = strrchr(di.dli_fname, '/');
+		mark("glprobe:   %s %#llx %s+%#lx (%s+%#lx)", tag, (unsigned long long)a,
+		    base ? base + 1 : di.dli_fname, (unsigned long)(a - (uintptr_t)di.dli_fbase),
+		    di.dli_sname ? di.dli_sname : "?",
+		    di.dli_saddr ? (unsigned long)(a - (uintptr_t)di.dli_saddr) : 0ul);
+	} else {
+		mark("glprobe:   %s %#llx", tag, (unsigned long long)a);
+	}
+}
+
+static void *
+watchdog(void *arg)
+{
+	(void)arg;
+	sleep(8);
+	for (int k = 0; k < 14; k++) {
+		thread_basic_info_data_t bi;
+		mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+		thread_info(main_thread, THREAD_BASIC_INFO, (thread_info_t)&bi, &n);
+		arm_thread_state64_t st;
+		n = ARM_THREAD_STATE64_COUNT;
+		kern_return_t kr = thread_get_state(main_thread, ARM_THREAD_STATE64, (thread_state_t)&st, &n);
+		mark("glprobe: sample %d step '%s': run_state %d flags %#x cpu %d user %d.%06d sys %d.%06d kr %#x",
+		    k, step, bi.run_state, bi.flags, bi.cpu_usage, bi.user_time.seconds,
+		    bi.user_time.microseconds, bi.system_time.seconds, bi.system_time.microseconds, kr);
+		if (!kr) {
+			where("pc", arm_thread_state64_get_pc(st));
+			where("lr", arm_thread_state64_get_lr(st));
+			uint64_t *fp = (uint64_t *)(uintptr_t)arm_thread_state64_get_fp(st);
+			for (int d = 0; d < 12 && fp && ((uintptr_t)fp & 7) == 0; d++) {
+				where("fr", fp[1]);
+				if ((uint64_t *)(uintptr_t)fp[0] <= fp)
+					break;
+				fp = (uint64_t *)(uintptr_t)fp[0];
+			}
+		}
+		sleep(2);
+	}
+	return NULL;
+}
+
 typedef void *(*create_fn)(unsigned, int, int, int, void *);
 typedef unsigned char (*make_fn)(void *, void *, unsigned, int, int);
 typedef const unsigned char *(*str_fn)(unsigned);
@@ -77,6 +129,9 @@ main(void)
 	logfd = open("/private/var/tmp/glprobe.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	signal(SIGALRM, on_alarm);
 	alarm(40);
+	main_thread = mach_thread_self();
+	pthread_t wd;
+	pthread_create(&wd, NULL, watchdog, NULL);
 	setenv("FD_MESA_DEBUG", "msgs", 1);
 	setenv("MESA_LOG_FILE", "/private/var/tmp/mesa.log", 1);
 	STEP("dlopen");
