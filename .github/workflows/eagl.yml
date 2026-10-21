@@ -1,0 +1,26 @@
+name: eagl
+
+# EAGL shim for backboardd (t290/eagl): CoreAnimation's GLES renderer on Mesa.
+on:
+  workflow_dispatch:
+  push:
+    branches: [t290]
+    paths:
+      - "t290/eagl/**"
+      - ".github/workflows/eagl.yml"
+
+jobs:
+  layout:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: GLI dispatch layout (macOS SDK)
+        run: |
+          h=$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/OpenGL.framework/Headers/gliDispatch.h
+          ls -la "$h"
+          python3 t290/eagl/gli_layout.py "$h" | tee gli-layout.txt
+          wc -l gli-layout.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gli-layout
+          path: gli-layout.txt
