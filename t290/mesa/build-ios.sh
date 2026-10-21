@@ -31,7 +31,7 @@ meson setup build --cross-file "$here/cross-ios.txt" \
 	-Dc_args="-I$stub -I$PWD/include" -Dcpp_args="-I$stub -I$PWD/include" \
 	-Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled \
 	-Dllvm=disabled -Dvulkan-drivers= -Dgallium-drivers=softpipe,freedreno \
-	-Dosmesa=true -Dshared-glapi=disabled -Dgles1=disabled -Dgles2=enabled \
+	-Dosmesa=true -Dshared-glapi=disabled -Dgles1=disabled -Dgles2=disabled \
 	-Dxmlconfig=disabled -Dzstd=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
 	-Dbuild-tests=false -Dtools=
 ninja -C build src/compiler/spirv/spirv_info.h src/compiler/spirv/vtn_generator_ids.h > /dev/null 2>&1 || true
