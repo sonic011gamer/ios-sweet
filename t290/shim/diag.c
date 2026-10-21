@@ -767,11 +767,8 @@ static uint32_t rpm_req(uint32_t rtype, uint32_t rid, const uint32_t *kv, int nk
 
 static int sd_power_on(void)
 {
-	STEP("smem find rpm");
-	if (!smd_find_rpm())
-		return 0;
-	STEP("smd open");
-	if (!smd_open())
+	STEP("rpm up");
+	if (!rpm_up())
 		return 0;
 	static const uint32_t on_2v95[] = { RPM_KEY_UV, 2950000, RPM_KEY_SWEN, 1 };
 	STEP("rpm L12 on");
@@ -790,6 +787,7 @@ static int sd_power_on(void)
 #define XFER_READ	0x10
 
 static uint32_t sd_sec[128];
+static int sd_ok;		/* card selected (CMD7), sd_read_block usable */
 
 /* Wait for normal-interrupt bits; returns the status, 0x8000 set on error. */
 static uint32_t sd_wait_int(uint32_t bits, unsigned ms)
@@ -831,6 +829,35 @@ static uint32_t sd_read_block(uint32_t lba)
 	return 0;
 fail:
 	sd_reset(2 | 4);				/* CMD and DAT lines */
+	return (st >> 16) | 0x10000 | (st ? 0 : 0x20000);
+}
+
+/* CMD24, PIO: write sd_sec to one block. 0 = ok. */
+static uint32_t sd_write_block(uint32_t lba)
+{
+	for (int i = 0; hc(HC_PSTATE) & 3; i++) {
+		if (i > 100)
+			return 0x40000;
+		delay_ms(1);
+	}
+	hc_wr(HC_INT, 0xffffffff);
+	hc_wr(HC_BLK, 512 | 1 << 16);
+	hc_wr(HC_ARG, lba);
+	hc_wr(HC_XFER_CMD, (24 << 8 | CMD_DATA | RSP_48) << 16);	/* transfer mode 0: write */
+	uint32_t st = sd_wait_int(1, 100);
+	if (!(st & 1) || (st & 0x8000))
+		goto fail;
+	st = sd_wait_int(0x10, 500);			/* buffer write ready */
+	if (!(st & 0x10) || (st & 0x8000))
+		goto fail;
+	for (int i = 0; i < 128; i++)
+		hc_wr(HC_DATA, sd_sec[i]);
+	st = sd_wait_int(2, 1000);			/* transfer complete (after card busy) */
+	if (!(st & 2) || (st & 0x8000))
+		goto fail;
+	return 0;
+fail:
+	sd_reset(2 | 4);
 	return (st >> 16) | 0x10000 | (st ? 0 : 0x20000);
 }
 
@@ -955,6 +982,7 @@ static void sd_probe(void)
 		con_hex3("CMD7", "e=", e7, 0, 0, 0, 0);
 		return;
 	}
+	sd_ok = 1;
 	STEP("read lba0 400k 1bit");
 	sd_show_sector("LBA0", 0);
 
@@ -1157,7 +1185,7 @@ static void gpu_hello(void)
 		for (unsigned i = 0; i < 512; i++)
 			wr32(pt + 8 * i, 0), wr32(pt + 8 * i + 4, 0);
 		for (unsigned i = 2; i < 4; i++)	/* block | AttrIdx 0 | AP[1] | SH inner | AF */
-			wr32(pt + 8 * i, (uint32_t)i << 30 | 1U << 10 | 1U << 6 | 1);	/* run 13: SH=0 like the (working) walk */
+			wr32(pt + 8 * i, (uint32_t)i << 30 | 1U << 10 | 1U << 6 | 1);	/* AF=0 gave AFF at the PFP fetch (run 19): the walk reads DRAM */
 		for (uintptr_t a = GPU_MEM; a < GPU_MEM + 0x40000; a += 64)
 			__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
 		__asm__ volatile("dsb sy" ::: "memory");
@@ -1180,6 +1208,37 @@ static void gpu_hello(void)
 		__asm__ volatile("dsb sy" ::: "memory");
 		con_hex3("CB0SET", "sctlr=", rd32(cb + 0x0), "tcr=", rd32(cb + 0x30), "ttbr=", rd32(cb + 0x20));
 		con_hex3("CB0SET", "cba2r=", rd32(smmu + 0x1800), "fsr=", rd32(cb + 0x58), "tlbst=", rd32(cb + 0x7f4));
+	}
+
+	/*
+	 * run 18: TZ restore_sec_cfg (MP 0xC cmd 2) succeeded, nothing changed:
+	 * the CP's reads leave the SMMU and never come back. Next stop: the GPU's
+	 * BIMC master port (mas-oxili, qport 2, "fixed" QoS, ap-owned: Linux
+	 * msm_bus programs it on the first vote). Registers per Linux
+	 * msm_bus_bimc_adhoc.c: M_REG_BASE = bimc + 0x8000, 0x4000 per port.
+	 * Port 0 (apps, works) for comparison; then BKE (bandwidth keeper) off.
+	 */
+	STEP("gpu2 bimc read");
+	{
+		static const uint16_t off[] = { 0x000, 0x200, 0x210, 0x230, 0x240, 0x250, 0x300, 0x310, 0x320, 0x330 };
+		for (unsigned port = 0; port <= 2; port += 2) {
+			uintptr_t m = 0x00400000UL + 0x8000 + 0x4000 * port;
+			for (unsigned i = 0; i < sizeof(off) / sizeof(off[0]); i += 3) {
+				plog_str(">> bimc ");
+				plog_hex(port, 1);
+				plog_putc(' ');
+				plog_hex(off[i], 3);
+				plog_str("\n");
+				con_hex3(port ? "BIMC2" : "BIMC0", "a=", rd32(m + off[i]),
+					 i + 1 < 10 ? "b=" : 0, i + 1 < 10 ? rd32(m + off[i + 1]) : 0,
+					 i + 2 < 10 ? "c=" : 0, i + 2 < 10 ? rd32(m + off[i + 2]) : 0);
+			}
+		}
+		uintptr_t m2 = 0x00400000UL + 0x8000 + 0x4000 * 2;
+		STEP("gpu2 bimc bke off");
+		if (rd32(m2 + 0x300) & 1)
+			wr32(m2 + 0x300, rd32(m2 + 0x300) & ~1U);	/* M_BKE_EN */
+		con_hex3("BIMC2", "bke=", rd32(m2 + 0x300), "prio=", rd32(m2 + 0x230), 0, 0);
 	}
 
 	STEP("gpu2 micro mmu");
@@ -1406,6 +1465,35 @@ static void __attribute__((unused)) gpu_probe(void)
 		 "bimc=", rd32(GCC_BASE + GCC_BIMC_GFX_CBCR) | b,
 		 "core=", rd32(GCC_BASE + GCC_OXILI_GFX3D_CBCR) | c);
 	con_hex3("GFX3D", "cmd=", rd32(GCC_BASE + GCC_GFX3D_CMD), "cfg=", rd32(GCC_BASE + GCC_GFX3D_CFG), 0, 0);
+	/*
+	 * run 19: the live FDT puts gdsc_oxili_cx at 0x185904c, not 0x59044
+	 * (which reads like a GDSC too: a0222800). kgsl also enables
+	 * rbbmtimer_clk and alwayson_clk, never switched on here. Look at
+	 * 0x59040-0x5904c and switch on what each looks like: a GDSC (wait
+	 * fields 0x222xxx) is powered up, a branch CBCR is enabled.
+	 */
+	STEP("gpu gcc 59040-5904c");
+	con_hex3("GCC59", "40=", rd32(GCC_BASE + 0x59040), "44=", rd32(GCC_BASE + 0x59044),
+		 "48=", rd32(GCC_BASE + 0x59048));
+	con_hex3("GCC59", "4c=", rd32(GCC_BASE + 0x5904c), 0, 0, 0, 0);
+	for (uint32_t off = 0x59040; off <= 0x5904c; off += 4) {
+		uint32_t v = rd32(GCC_BASE + off);
+		if (off == GCC_OXILI_CX_GDSCR)
+			continue;			/* handled above since gpu1 */
+		if ((v & 0x00fff000) == 0x00222000) {
+			plog_str(">> gpu gdsc on ");
+			plog_hex(off, 5);
+			plog_str("\n");
+			gdsc_on(off);
+		} else if (v & CBCR_CLK_OFF) {
+			plog_str(">> gpu clk on ");
+			plog_hex(off, 5);
+			plog_str("\n");
+			clk_on(off);
+		}
+	}
+	con_hex3("GCC59", "40=", rd32(GCC_BASE + 0x59040), "48=", rd32(GCC_BASE + 0x59048),
+		 "4c=", rd32(GCC_BASE + 0x5904c));
 	if (!a || !c) {
 		con_str("GPU", "clocks did not start; not touching the GPU");
 		return;
@@ -2125,7 +2213,7 @@ static void boot_android(void)
  * each on the A53) timed against the 19.2 MHz counter, with the I-cache on
  * so the loop does not run from uncached DRAM.
  */
-static uint32_t cpu_mhz(void)
+static __attribute__((unused)) uint32_t cpu_mhz(void)
 {
 	uint64_t sctlr = rsr("sctlr_el1");
 	__asm__ volatile("msr sctlr_el1, %0; isb" :: "r"(sctlr | 1U << 12));
@@ -2146,7 +2234,7 @@ static uint32_t cpu_mhz(void)
  * Linux clk-smd-rpm msm8937: bimc = MEM_CLK "clk2" id 0, snoc = BUS_CLK
  * "clk1" id 1; rates in KHz, the RPM rounds to a supported level.
  */
-static void perf_votes(void)
+static __attribute__((unused)) void perf_votes(void)
 {
 	static const uint32_t bimc[] = { 0x007a484b /* "KHz" */, 800000 };
 	static const uint32_t snoc[] = { 0x007a484b, 400000 };
@@ -2160,6 +2248,58 @@ static void perf_votes(void)
 	con_hex3("PERF", "rpm=", (uint32_t)rpm, "bimc=", b, "snoc=", s);
 }
 
+/*
+ * Unattended probes: Android (root) writes "T290CMD1", a nonce and a command
+ * into one microSD sector 1 MiB past the 16 GiB HFSX root volume, then
+ * "adb reboot recovery". A nonce not seen before runs the command, which
+ * ends by rebooting to Android; the last nonce lives next to the run counter
+ * (DDR, kept across warm resets), so entering recovery by hand afterwards
+ * shows the menu.
+ */
+#define CMD_LBA		33556480u
+#define CMD_NONCE_AT	(RUNS_AT + 8)
+
+static __attribute__((unused)) int auto_command(void)
+{
+	con_hex3("BOOT", "reason=", rd32(IMEM_RESTART_REASON), "nonce=", rd32(CMD_NONCE_AT), 0, 0);
+	/*
+	 * The SDCC2 AHB clock first: sd_probe's first register write with it
+	 * off reset the SoC, and Samsung's LK then booted recovery again, five
+	 * times in a row (2026-10-21). show_sd() did this; auto_command forgot.
+	 */
+	STEP("auto sdcc2 ahb");
+	if (!clk_on(GCC_SDCC2_AHB))
+		return 0;
+	STEP("auto sd probe");
+	int q = con_quiet;
+	con_quiet = 1;
+	sd_probe();
+	con_quiet = q;
+	if (!sd_ok || sd_read_block(CMD_LBA))
+		return 0;
+	const char *c = (const char *)sd_sec;
+	static const char magic[8] = { 'T', '2', '9', '0', 'C', 'M', 'D', '1' };
+	for (int i = 0; i < 8; i++)
+		if (c[i] != magic[i])
+			return 0;
+	uint32_t nonce = sd_sec[2];
+	con_hex3("AUTOCMD", "nonce=", nonce, "cmd=", sd_sec[3], 0, 0);
+	if (nonce == rd32(CMD_NONCE_AT))
+		return 0;
+	wr32(CMD_NONCE_AT, nonce);
+	int gpu = c[12] == 'g' && c[13] == 'p' && c[14] == 'u';
+	/* one-shot: wipe the command before running it (no loop even if LK comes back here) */
+	for (int i = 0; i < 128; i++)
+		sd_sec[i] = 0;
+	uint32_t we = sd_write_block(CMD_LBA);
+	con_hex3("AUTOCMD", "wipe=", we, "gpu=", (uint32_t)gpu, 0, 0);
+	if (we)
+		return 0;			/* could not wipe: do not risk a loop */
+	/* a crash during the command resets into Android, not back here */
+	wr32(IMEM_RESTART_REASON, RESTART_NORMAL);
+	return gpu;
+}
+
 static void boot_menu(uint64_t dtb, uint32_t runs)
 {
 	struct button menu[4], again[2];
@@ -2170,6 +2310,14 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	set_btn(&again[0], 16, 1150, 380, 114, "Log", GREY);
 	set_btn(&again[1], 404, 1150, 380, 114, "Back", IOSBLUE);
 	STEP("menu");
+#if defined(T290_MENU_EXTRAS)
+	if (auto_command()) {
+		con_clear(DARK);
+		con_str("AUTO", "GPU diagnostics, then Android");
+		gpu_probe();
+		boot_android();
+	}
+#endif
 	ts_ok = touch_init();
 	for (;;) {
 		con_clear(DARK);
@@ -2186,11 +2334,13 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 		char run[] = "run 0000";
 		fmt_hex(run + 4, runs, 4);
 		text_at(50, 1200, run, GREY, DARK, 2);
+#if defined(T290_MENU_EXTRAS)
 		char mhz[] = "CPU 0000 MHz";
 		uint32_t m = cpu_mhz();
 		for (int i = 3; i >= 0; i--, m /= 10)
 			mhz[4 + i] = (char)('0' + m % 10);
 		text_at(330, 1200, mhz, GREY, DARK, 2);
+#endif
 		int k = wait_tap(menu, 4);
 		if (k == 0)
 			break;
@@ -2212,7 +2362,9 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	}
 	con_clear(DARK);
 	con_str("T290", "booting iPadOS 16");
+#if defined(T290_MENU_EXTRAS)
 	perf_votes();
+#endif
 	(void)dtb;
 }
 

@@ -116,6 +116,20 @@ from an Android app) and compare HLSQ/SP CS registers. (2) 2D scaling: the
 "few more registers" Mesa mentions - capture a scaled blit from the blob
 (C2D / GLES glBlitFramebuffer). (3) Bare-metal: zap shader via TZ (a506_zap).
 
+## SOLVED 2026-10-21 (gpu21): the GPU runs commands on bare metal
+**The green square was drawn by the CP** (rptr = wptr = 0x1e81, splash pixel
+00ff0000, RBBM_STATUS 1, no SMMU fault). The missing piece were two GPU clocks
+kgsl enables and we did not: **GCC 0x59040 (rbbmtimer, oxili timer CBCR)** and
+**GCC 0x5904c (alwayson CBCR)**, both read 0x80000000 (CLK_OFF). Without them
+the CP microcode waits forever at start (CPSTAT pfp0 0x100 / me0 0x80; after:
+0x102 / 0xfe). 0x59044 reads like a GDSC (a0222800, the "cx" gdsc_on of gpu1).
+Working sequence (t290/shim/diag.c gpu_probe + gpu_hello): GDSCs, gfx3d 200 MHz,
+ahb/bimc_gfx/gfx3d/bimc_gpu/timer/alwayson clocks, microcode at INSTR_BASE,
+a5xx_hw_init values, SMMU CB0 AArch32 LPAE identity (TTBCR EAE, 1 GiB blocks,
+MAIR0 0x44, SH 0), SECVID 0 before CP start, CP_PFP_ME_CNTL 0, CP_ME_INIT,
+then any PM4. Not needed after all (kept for now): RPM bus votes, SCM
+restore_sec_cfg (MP 0xC: ret 0), BIMC port 2 (same config as port 0).
+
 ## gpu2 bare metal (2026-10-21, t290/shim -DT290_GPU_PROBE -DT290_GPU2, FW_DIR)
 Microcode (fw.S .incbin), a5xx_hw_init values, ring 32 KiB, CP_ME_INIT, SECVID 0,
 CP_MEM_WRITE square. Logs: ios-t290/logs/gpu*-pstore.txt. Result so far: the CP
