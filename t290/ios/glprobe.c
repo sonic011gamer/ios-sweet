@@ -3,7 +3,7 @@
  * iPadOS without linking it: dlopen + dlsym, a mark after every step on
  * /dev/console (stdout) and in /private/var/tmp/glprobe.log (fsync'ed), and
  * an alarm that names the step a hang happened in. From 8 s on a watchdog
- * thread samples the main thread every 2 s (pc/lr, frame chain, run state,
+ * thread samples the main thread every 15 s (pc/lr, frame chain, run state,
  * CPU time) to tell a spin from a sleep in the kernel.
  */
 #include <dlfcn.h>
@@ -16,21 +16,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static int logfd = -1;
+static struct timespec t0;
 static const char *volatile step = "start";
 
 static void
 mark(const char *fmt, ...)
 {
 	char buf[512];
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	double dt = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
+	int h = snprintf(buf, sizeof(buf), "[%7.2f] ", dt);
 	va_list ap;
 	va_start(ap, fmt);
-	int n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+	int n = vsnprintf(buf + h, sizeof(buf) - 1 - h, fmt, ap);
 	va_end(ap);
 	if (n < 0)
 		return;
+	n += h;
 	if (n > (int)sizeof(buf) - 2)
 		n = sizeof(buf) - 2;
 	buf[n++] = '\n';
@@ -84,7 +91,7 @@ watchdog(void *arg)
 {
 	(void)arg;
 	sleep(8);
-	for (int k = 0; k < 14; k++) {
+	for (int k = 0; k < 60; k++) {
 		thread_basic_info_data_t bi;
 		mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
 		thread_info(main_thread, THREAD_BASIC_INFO, (thread_info_t)&bi, &n);
@@ -98,14 +105,14 @@ watchdog(void *arg)
 			where("pc", arm_thread_state64_get_pc(st));
 			where("lr", arm_thread_state64_get_lr(st));
 			uint64_t *fp = (uint64_t *)(uintptr_t)arm_thread_state64_get_fp(st);
-			for (int d = 0; d < 12 && fp && ((uintptr_t)fp & 7) == 0; d++) {
+			for (int d = 0; d < 6 && fp && ((uintptr_t)fp & 7) == 0; d++) {
 				where("fr", fp[1]);
 				if ((uint64_t *)(uintptr_t)fp[0] <= fp)
 					break;
 				fp = (uint64_t *)(uintptr_t)fp[0];
 			}
 		}
-		sleep(2);
+		sleep(15);
 	}
 	return NULL;
 }
@@ -128,7 +135,8 @@ main(void)
 {
 	logfd = open("/private/var/tmp/glprobe.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	signal(SIGALRM, on_alarm);
-	alarm(40);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	alarm(900);
 	main_thread = mach_thread_self();
 	pthread_t wd;
 	pthread_create(&wd, NULL, watchdog, NULL);
