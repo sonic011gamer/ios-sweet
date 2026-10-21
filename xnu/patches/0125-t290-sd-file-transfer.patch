@@ -1,0 +1,228 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 0c22744..0cc0d39 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_vblk.c			standard
+ bsd/dev/sweet_sdhc.c			standard
+ bsd/dev/sweet_t290_touch.c		standard
+ bsd/dev/sweet_t290_gpu.c		standard
++bsd/dev/sweet_t290_xfer.c		standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/sweet_sdhc.c b/bsd/dev/sweet_sdhc.c
+index 1347506..7a26474 100755
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -686,6 +686,30 @@ sd_card_init(void)
+ 	return 0;
+ }
+ 
++/*
++ * Absolute card sectors for bsd/dev/sweet_t290_xfer.c (the raw area past
++ * the root volume): at most 1 MiB, through the bounce buffer, locked.
++ */
++int sweet_sdhc_raw(uint64_t lba, void *buf, uint32_t nsec, bool write);
++int
++sweet_sdhc_raw(uint64_t lba, void *buf, uint32_t nsec, bool write)
++{
++	char *bounce = (char *)(sd.dma + DMA_BOUNCE);
++	if (!sd.ready || nsec == 0 || nsec > BOUNCE_SIZE / SECTOR || (write && !sd.writable)) {
++		return EINVAL;
++	}
++	lck_mtx_lock(&sweet_sdhc_lock);
++	if (write) {
++		memcpy(bounce, buf, (size_t)nsec * SECTOR);
++	}
++	int error = sd_rw(lba, nsec, write);
++	if (!error && !write) {
++		memcpy(buf, bounce, (size_t)nsec * SECTOR);
++	}
++	lck_mtx_unlock(&sweet_sdhc_lock);
++	return error;
++}
++
+ /* ---- block device ---- */
+ 
+ static int
+@@ -942,6 +966,8 @@ sweet_sdhc_init(void)
+ 	sweet_keys_init();
+ 	extern void sweet_t290_gpu_init(void);          /* bsd/dev/sweet_t290_gpu.c */
+ 	sweet_t290_gpu_init();
++	extern void sweet_t290_xfer_start(void);         /* bsd/dev/sweet_t290_xfer.c */
++	sweet_t290_xfer_start();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/sweet_t290_xfer.c b/bsd/dev/sweet_t290_xfer.c
+new file mode 100755
+index 0000000..08f6ffe
+--- /dev/null
++++ b/bsd/dev/sweet_t290_xfer.c
+@@ -0,0 +1,166 @@
++/*
++ * SWEET_BOARD=t290: file transfer between Android and the iPadOS root
++ * through raw microSD sectors past the 16 GiB HFSX root volume (Android
++ * cannot mount HFS+). t290/tools/t290-xfer.ps1 writes a request from
++ * Android; at boot, once the root is mounted, this thread carries it out
++ * through the VFS and marks it done (one shot, no state elsewhere).
++ *
++ * Layout from XFER_LBA (512-byte sectors, little-endian):
++ *   +0        header: "T290XFR1", u32 nonce, u32 nops (<= 32), u32 state
++ *             (0 pending, 1 done), u32 kernel results summary
++ *   +1+i      op i: u32 op (1 put, 2 get), u32 mode, u64 size (put: bytes;
++ *             get: capacity), u64 data_lba, i64 result (bytes or -errno),
++ *             path at +64 (NUL-terminated, < 448 bytes)
++ *   data      wherever data_lba points (beyond the op sectors)
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_T290)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/vnode.h>
++#include <sys/fcntl.h>
++#include <sys/kauth.h>
++#include <sys/uio.h>
++#include <kern/thread.h>
++#include <kern/clock.h>
++#include <kern/kalloc.h>
++#include <IOKit/IOLib.h>
++
++extern vnode_t rootvnode;
++extern int sweet_sdhc_raw(uint64_t lba, void *buf, uint32_t nsec, bool write);  /* sweet_sdhc.c */
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern kern_return_t thread_terminate(thread_t);
++void sweet_t290_xfer_start(void);
++
++#define XFER_LBA        33558528ULL     /* 1 MiB past the shim's command sector */
++#define XFER_MAX_OPS    32
++#define CHUNK_SECT      2048u           /* 1 MiB per SD transfer */
++
++struct xfer_op {
++	uint32_t op, mode;
++	uint64_t size, data_lba;
++	int64_t result;
++	uint8_t pad[64 - 32];
++	char path[448];
++};
++
++static int64_t
++xfer_put(struct xfer_op *o, uint8_t *buf, vfs_context_t ctx)
++{
++	vnode_t vp = NULLVP;
++	int err = vnode_open(o->path, O_CREAT | O_TRUNC | FWRITE, (int)(o->mode & 07777), 0, &vp, ctx);
++	if (err) {
++		return -err;
++	}
++	uint64_t done = 0;
++	while (!err && done < o->size) {
++		uint32_t nsec = (uint32_t)MIN((o->size - done + 511) / 512, CHUNK_SECT);
++		uint64_t bytes = MIN((uint64_t)nsec * 512, o->size - done);
++		if (sweet_sdhc_raw(o->data_lba + done / 512, buf, nsec, false)) {
++			err = EIO;
++			break;
++		}
++		int resid = 0;
++		err = vn_rdwr(UIO_WRITE, vp, (caddr_t)buf, (int)bytes, (off_t)done, UIO_SYSSPACE,
++		    IO_NOAUTH | IO_SYNC, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		done += bytes - (uint64_t)resid;
++	}
++	if (!err) {
++		struct vnode_attr va;
++		VATTR_INIT(&va);
++		VATTR_SET(&va, va_mode, (mode_t)(o->mode & 07777));
++		(void)vnode_setattr(vp, &va, ctx);
++	}
++	vnode_close(vp, FWRITE, ctx);
++	return err ? -err : (int64_t)done;
++}
++
++static int64_t
++xfer_get(struct xfer_op *o, uint8_t *buf, vfs_context_t ctx)
++{
++	vnode_t vp = NULLVP;
++	int err = vnode_open(o->path, FREAD, 0, 0, &vp, ctx);
++	if (err) {
++		return -err;
++	}
++	uint64_t done = 0;
++	while (!err && done < o->size) {
++		uint64_t want = MIN((uint64_t)CHUNK_SECT * 512, o->size - done);
++		int resid = 0;
++		bzero(buf, (size_t)CHUNK_SECT * 512);
++		err = vn_rdwr(UIO_READ, vp, (caddr_t)buf, (int)want, (off_t)done, UIO_SYSSPACE,
++		    IO_NOAUTH, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		uint64_t got = want - (uint64_t)resid;
++		if (err || got == 0) {
++			break;
++		}
++		if (sweet_sdhc_raw(o->data_lba + done / 512, buf, (uint32_t)((got + 511) / 512), true)) {
++			err = EIO;
++			break;
++		}
++		done += got;
++		if (got < want) {
++			break;                          /* end of file */
++		}
++	}
++	vnode_close(vp, FREAD, ctx);
++	return err ? -err : (int64_t)done;
++}
++
++static void
++xfer_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	/* wait for the root file system (mounted read-write: rootrw=1) */
++	for (int i = 0; i < 300 && rootvnode == NULLVP; i++) {
++		IOSleep(1000);
++	}
++	IOSleep(3000);
++	uint8_t *buf = (uint8_t *)IOMallocData((size_t)CHUNK_SECT * 512);
++	uint32_t *hdr = (uint32_t *)IOMallocData(512);
++	struct xfer_op *op = (struct xfer_op *)IOMallocData(512);
++	if (rootvnode == NULLVP || buf == NULL || hdr == NULL || op == NULL ||
++	    sweet_sdhc_raw(XFER_LBA, hdr, 1, false)) {
++		goto out;
++	}
++	if (memcmp(hdr, "T290XFR1", 8) != 0 || hdr[4] != 0 || hdr[3] == 0 || hdr[3] > XFER_MAX_OPS) {
++		goto out;                               /* nothing pending */
++	}
++	vfs_context_t ctx = vfs_context_kernel();
++	uint32_t ok = 0;
++	for (uint32_t i = 0; i < hdr[3]; i++) {
++		if (sweet_sdhc_raw(XFER_LBA + 1 + i, op, 1, false)) {
++			continue;
++		}
++		op->path[sizeof(op->path) - 1] = 0;
++		op->result = op->op == 1 ? xfer_put(op, buf, ctx) :
++		    op->op == 2 ? xfer_get(op, buf, ctx) : -EINVAL;
++		ok += op->result >= 0;
++		printf("SWEET XFER: %s %s -> %lld\n", op->op == 1 ? "put" : "get", op->path, op->result);
++		(void)sweet_sdhc_raw(XFER_LBA + 1 + i, op, 1, true);
++	}
++	hdr[4] = 1;
++	hdr[5] = ok;
++	(void)sweet_sdhc_raw(XFER_LBA, hdr, 1, true);
++	printf("SWEET XFER: request %#x done, %u of %u ops ok\n", hdr[2], ok, hdr[3]);
++out:
++	if (buf != NULL) {
++		IOFreeData(buf, (size_t)CHUNK_SECT * 512);
++	}
++	if (hdr != NULL) {
++		IOFreeData(hdr, 512);
++	}
++	if (op != NULL) {
++		IOFreeData(op, 512);
++	}
++	(void)thread_terminate(current_thread());
++}
++
++void
++sweet_t290_xfer_start(void)
++{
++	thread_t t;
++	if (kernel_thread_start(xfer_thread, NULL, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_T290 */
