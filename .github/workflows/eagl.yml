@@ -24,3 +24,21 @@ jobs:
         with:
           name: gli-layout
           path: gli-layout.txt
+
+  shim:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
+            -dynamiclib -install_name /usr/lib/t290eagl.dylib -o out/t290eagl.dylib \
+            t290/eagl/eaglprobe.m -framework Foundation
+          codesign -s - -f out/t290eagl.dylib
+          otool -L out/t290eagl.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t290eagl
+          path: out
