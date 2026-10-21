@@ -1,0 +1,14 @@
+# meson cross file: iPadOS 16 arm64 (Xcode iphoneos SDK), for t290/mesa/build-ios.sh
+[binaries]
+c = ['xcrun', '-sdk', 'iphoneos', 'clang', '-arch', 'arm64', '-miphoneos-version-min=16.0']
+cpp = ['xcrun', '-sdk', 'iphoneos', 'clang++', '-arch', 'arm64', '-miphoneos-version-min=16.0']
+objc = ['xcrun', '-sdk', 'iphoneos', 'clang', '-arch', 'arm64', '-miphoneos-version-min=16.0']
+ar = ['xcrun', '-sdk', 'iphoneos', 'ar']
+strip = ['xcrun', '-sdk', 'iphoneos', 'strip']
+pkg-config = 'false'
+
+[host_machine]
+system = 'darwin'
+cpu_family = 'aarch64'
+cpu = 'arm64'
+endian = 'little'

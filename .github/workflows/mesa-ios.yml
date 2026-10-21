@@ -1,0 +1,35 @@
+name: mesa-ios
+
+# Mesa Freedreno for iPadOS arm64 (SM-T290 port): t290/mesa/build-ios.sh.
+on:
+  workflow_dispatch:
+  push:
+    branches: [t290]
+    paths:
+      - "t290/mesa/**"
+      - ".github/workflows/mesa-ios.yml"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          python3 -m pip install --break-system-packages meson==1.5.2 mako pyyaml packaging || \
+            python3 -m pip install meson==1.5.2 mako pyyaml packaging
+          brew install ninja || true
+          meson --version; ninja --version
+      - name: Build
+        run: |
+          WORK=$PWD/mesa-work bash t290/mesa/build-ios.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesa-ios
+          path: |
+            mesa-work/build.log
+            mesa-work/mesa-24.2.8/build/meson-logs/meson-log.txt
+            mesa-work/mesa-24.2.8/build/src/freedreno/drm/*.a
+            mesa-work/mesa-24.2.8/build/src/gallium/drivers/freedreno/*.a
+            mesa-work/mesa-24.2.8/build/src/mesa/*.a
