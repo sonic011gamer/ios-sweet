@@ -1,0 +1,92 @@
+diff --git a/bsd/dev/sweet_sdhc.c b/bsd/dev/sweet_sdhc.c
+index 7a26474..fee393a 100755
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -966,8 +966,6 @@ sweet_sdhc_init(void)
+ 	sweet_keys_init();
+ 	extern void sweet_t290_gpu_init(void);          /* bsd/dev/sweet_t290_gpu.c */
+ 	sweet_t290_gpu_init();
+-	extern void sweet_t290_xfer_start(void);         /* bsd/dev/sweet_t290_xfer.c */
+-	sweet_t290_xfer_start();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/sweet_t290_xfer.c b/bsd/dev/sweet_t290_xfer.c
+index 08f6ffe..48d5757 100755
+--- a/bsd/dev/sweet_t290_xfer.c
++++ b/bsd/dev/sweet_t290_xfer.c
+@@ -2,8 +2,10 @@
+  * SWEET_BOARD=t290: file transfer between Android and the iPadOS root
+  * through raw microSD sectors past the 16 GiB HFSX root volume (Android
+  * cannot mount HFS+). t290/tools/t290-xfer.ps1 writes a request from
+- * Android; at boot, once the root is mounted, this thread carries it out
+- * through the VFS and marks it done (one shot, no state elsewhere).
++ * Android; bsd_init carries it out through the VFS right after the root is
++ * mounted and before launchd starts (a first version ran 3 s later on a
++ * thread and launchd once read a half-written launchd.plist: panic), and
++ * marks it done (one shot, no state elsewhere).
+  *
+  * Layout from XFER_LBA (512-byte sectors, little-endian):
+  *   +0        header: "T290XFR1", u32 nonce, u32 nops (<= 32), u32 state
+@@ -27,10 +29,7 @@
+ 
+ extern vnode_t rootvnode;
+ extern int sweet_sdhc_raw(uint64_t lba, void *buf, uint32_t nsec, bool write);  /* sweet_sdhc.c */
+-extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+-extern void thread_deallocate(thread_t);
+-extern kern_return_t thread_terminate(thread_t);
+-void sweet_t290_xfer_start(void);
++void sweet_t290_xfer_run(void);
+ 
+ #define XFER_LBA        33558528ULL     /* 1 MiB past the shim's command sector */
+ #define XFER_MAX_OPS    32
+@@ -107,14 +106,9 @@ xfer_get(struct xfer_op *o, uint8_t *buf, vfs_context_t ctx)
+ 	return err ? -err : (int64_t)done;
+ }
+ 
+-static void
+-xfer_thread(__unused void *arg, __unused wait_result_t wr)
++void
++sweet_t290_xfer_run(void)
+ {
+-	/* wait for the root file system (mounted read-write: rootrw=1) */
+-	for (int i = 0; i < 300 && rootvnode == NULLVP; i++) {
+-		IOSleep(1000);
+-	}
+-	IOSleep(3000);
+ 	uint8_t *buf = (uint8_t *)IOMallocData((size_t)CHUNK_SECT * 512);
+ 	uint32_t *hdr = (uint32_t *)IOMallocData(512);
+ 	struct xfer_op *op = (struct xfer_op *)IOMallocData(512);
+@@ -152,15 +146,5 @@ out:
+ 	if (op != NULL) {
+ 		IOFreeData(op, 512);
+ 	}
+-	(void)thread_terminate(current_thread());
+-}
+-
+-void
+-sweet_t290_xfer_start(void)
+-{
+-	thread_t t;
+-	if (kernel_thread_start(xfer_thread, NULL, &t) == KERN_SUCCESS) {
+-		thread_deallocate(t);
+-	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_T290 */
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb2a2bf..2cf428c 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1098,6 +1098,12 @@ bsdinit_task(void)
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_T290)
++	/* SD file transfer (bsd/dev/sweet_t290_xfer.c) before launchd reads anything */
++	extern void sweet_t290_xfer_run(void);
++	sweet_t290_xfer_run();
++#endif
++
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }
