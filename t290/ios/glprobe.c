@@ -71,6 +71,10 @@ on_alarm(int sig)
 
 static thread_t main_thread;
 
+/* private: raise this process's jetsam limit (root) */
+int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t size);
+#define MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT 6
+
 static void
 where(const char *tag, uint64_t a)
 {
@@ -97,7 +101,9 @@ watchdog(void *arg)
 		thread_info(main_thread, THREAD_BASIC_INFO, (thread_info_t)&bi, &n);
 		arm_thread_state64_t st;
 		n = ARM_THREAD_STATE64_COUNT;
-		kern_return_t kr = thread_get_state(main_thread, ARM_THREAD_STATE64, (thread_state_t)&st, &n);
+		/* thread_get_state waits for a thread in an uninterruptible wait */
+		kern_return_t kr = bi.run_state == TH_STATE_UNINTERRUPTIBLE ? KERN_ABORTED :
+		    thread_get_state(main_thread, ARM_THREAD_STATE64, (thread_state_t)&st, &n);
 		mark("glprobe: sample %d step '%s': run_state %d flags %#x cpu %d user %d.%06d sys %d.%06d kr %#x",
 		    k, step, bi.run_state, bi.flags, bi.cpu_usage, bi.user_time.seconds,
 		    bi.user_time.microseconds, bi.system_time.seconds, bi.system_time.microseconds, kr);
@@ -137,6 +143,11 @@ main(void)
 	signal(SIGALRM, on_alarm);
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	alarm(900);
+	/* Mesa reports through stderr: keep it in the log file */
+	if (logfd >= 0)
+		dup2(logfd, 2);
+	mark("glprobe: jetsam limit 1024 MB -> %d",
+	    memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, getpid(), 1024, NULL, 0));
 	main_thread = mach_thread_self();
 	pthread_t wd;
 	pthread_create(&wd, NULL, watchdog, NULL);
