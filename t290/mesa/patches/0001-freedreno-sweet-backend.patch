@@ -1,6 +1,6 @@
 diff -ruN a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
 --- a/src/freedreno/common/freedreno_devices.py	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/common/freedreno_devices.py	2026-10-21 19:15:34.648902859 +0800
++++ b/src/freedreno/common/freedreno_devices.py	2026-10-21 19:18:59.596996993 +0800
 @@ -250,6 +250,7 @@
      ))
  
@@ -11,7 +11,7 @@ diff -ruN a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/fre
          GPUId(509),
 diff -ruN a/src/freedreno/drm/freedreno_device.c b/src/freedreno/drm/freedreno_device.c
 --- a/src/freedreno/drm/freedreno_device.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/drm/freedreno_device.c	2026-10-21 19:15:34.648177590 +0800
++++ b/src/freedreno/drm/freedreno_device.c	2026-10-21 19:18:59.596349862 +0800
 @@ -41,6 +41,9 @@
  #ifdef HAVE_FREEDRENO_VIRTIO
  struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
@@ -50,7 +50,7 @@ diff -ruN a/src/freedreno/drm/freedreno_device.c b/src/freedreno/drm/freedreno_d
     fd_rd_dump_env_init();
 diff -ruN a/src/freedreno/drm/freedreno_drmif.h b/src/freedreno/drm/freedreno_drmif.h
 --- a/src/freedreno/drm/freedreno_drmif.h	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/drm/freedreno_drmif.h	2026-10-21 19:15:34.648477504 +0800
++++ b/src/freedreno/drm/freedreno_drmif.h	2026-10-21 19:18:59.596622477 +0800
 @@ -51,6 +51,9 @@
     FD_PIPE_MAX
  };
@@ -63,7 +63,7 @@ diff -ruN a/src/freedreno/drm/freedreno_drmif.h b/src/freedreno/drm/freedreno_dr
     FD_GMEM_SIZE,
 diff -ruN a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
 --- a/src/freedreno/drm/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/drm/meson.build	2026-10-21 19:15:34.647126357 +0800
++++ b/src/freedreno/drm/meson.build	2026-10-21 19:18:59.597415428 +0800
 @@ -62,6 +62,17 @@
    ]
  endif
@@ -82,9 +82,18 @@ diff -ruN a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
  libfreedreno_drm = static_library(
    'freedreno_drm',
    [
+@@ -73,7 +84,7 @@
+   gnu_symbol_visibility : 'hidden',
+   dependencies : libfreedreno_drm_deps,
+   # TODO
+-  link_with : [libvdrm],
++  link_with : freedreno_kmds.contains('virtio') ? [libvdrm] : [],
+   build_by_default : false,
+ )
+ 
 diff -ruN a/src/freedreno/meson.build b/src/freedreno/meson.build
 --- a/src/freedreno/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/meson.build	2026-10-21 19:15:34.649097252 +0800
++++ b/src/freedreno/meson.build	2026-10-21 19:18:59.597230952 +0800
 @@ -25,7 +25,7 @@
  subdir('ir3')
  subdir('fdl')

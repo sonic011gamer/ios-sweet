@@ -69,3 +69,5 @@ endif''', '''if system_has_kms_drm or host_machine.system() == 'darwin'
   subdir('drm')
 endif''')
 print('ok darwin drm')
+edit('src/freedreno/drm/meson.build', '''  link_with : [libvdrm],''', '''  link_with : freedreno_kmds.contains('virtio') ? [libvdrm] : [],''')
+print('ok libvdrm')
