@@ -698,6 +698,18 @@ static void smd_put(uint32_t *head, uint32_t w)
 }
 
 /*
+ * Open rpm_requests once per boot: smd_open zeroes our FIFO indices, so a
+ * second open (menu touch, GPU diagnostics, perf votes) would desync them.
+ */
+static int rpm_up(void)
+{
+	static int state = -1;
+	if (state < 0)
+		state = smd_find_rpm() && smd_open();
+	return state;
+}
+
+/*
  * One "req" to the active set: resource type/id with key/value pairs
  * {key, len 4, value}. Returns RPM's reply word count seen, 0 if none.
  */
@@ -1107,7 +1119,7 @@ static void gpu_hello(void)
 		static const uint32_t khz[] = { 0x007a484b /* "KHz" */, 400000 };
 		static const uint32_t bw[] = { 0x00007762 /* "bw" */, 2000000000 };
 		con_quiet = 1;
-		int rpm = smd_find_rpm() && smd_open();
+		int rpm = rpm_up();
 		uint32_t g = rpm ? rpm_req(0x326b6c63 /* "clk2" */, 2, khz, 1) : 0;
 		uint32_t m = rpm ? rpm_req(0x73616d62 /* "bmas" */, 6, bw, 1) : 0;
 		uint32_t s = rpm ? rpm_req(0x766c7362 /* "bslv" */, 0, bw, 1) : 0;
@@ -1652,7 +1664,7 @@ static void __attribute__((unused)) touch_probe(void)
 
 	con_quiet = 1;
 	STEP("touch rpm");
-	int rpm = smd_find_rpm() && smd_open();
+	int rpm = rpm_up();
 	uint32_t a5 = rpm ? rpm_req(RPM_LDOA, 5, l5, 2) : 0;
 	uint32_t a10 = rpm ? rpm_req(RPM_LDOA, 10, l10, 2) : 0;
 	con_quiet = 0;
@@ -1935,7 +1947,7 @@ static int touch_init(void)
 	STEP("menu touch power");
 	int q = con_quiet;
 	con_quiet = 1;
-	if (smd_find_rpm() && smd_open()) {
+	if (rpm_up()) {
 		rpm_req(RPM_LDOA, 5, l5, 2);
 		rpm_req(RPM_LDOA, 10, l10, 2);
 	}
@@ -2108,6 +2120,46 @@ static void boot_android(void)
 	text_at(40, 700, "reset failed", RED, DARK, 3);
 }
 
+/*
+ * CPU clock as LK left it: 64 dependent adds per loop iteration (1 cycle
+ * each on the A53) timed against the 19.2 MHz counter, with the I-cache on
+ * so the loop does not run from uncached DRAM.
+ */
+static uint32_t cpu_mhz(void)
+{
+	uint64_t sctlr = rsr("sctlr_el1");
+	__asm__ volatile("msr sctlr_el1, %0; isb" :: "r"(sctlr | 1U << 12));
+	uint64_t iters = 200000, x = 0;
+	uint64_t t0 = now();
+	for (uint64_t i = 0; i < iters; i++)
+		__asm__ volatile(
+			".rept 64\n\tadd %0, %0, #1\n\t.endr" : "+r"(x));
+	uint64_t t1 = now();
+	__asm__ volatile("msr sctlr_el1, %0; isb" :: "r"(sctlr));
+	return (uint32_t)(iters * 64 * timer_hz() / (t1 - t0) / 1000000);
+}
+
+/*
+ * iPadOS draws on the CPU: memory bandwidth matters. Android's drivers vote
+ * the DDR bus (BIMC) and the system NoC up through the RPM; nobody does
+ * that for xnu, so vote them before jumping (the active-set vote stays).
+ * Linux clk-smd-rpm msm8937: bimc = MEM_CLK "clk2" id 0, snoc = BUS_CLK
+ * "clk1" id 1; rates in KHz, the RPM rounds to a supported level.
+ */
+static void perf_votes(void)
+{
+	static const uint32_t bimc[] = { 0x007a484b /* "KHz" */, 800000 };
+	static const uint32_t snoc[] = { 0x007a484b, 400000 };
+	STEP("perf votes");
+	int q = con_quiet;
+	con_quiet = 1;
+	int rpm = rpm_up();
+	uint32_t b = rpm ? rpm_req(0x326b6c63 /* "clk2" */, 0, bimc, 1) : 0;
+	uint32_t s = rpm ? rpm_req(0x316b6c63 /* "clk1" */, 1, snoc, 1) : 0;
+	con_quiet = q;
+	con_hex3("PERF", "rpm=", (uint32_t)rpm, "bimc=", b, "snoc=", s);
+}
+
 static void boot_menu(uint64_t dtb, uint32_t runs)
 {
 	struct button menu[4], again[2];
@@ -2134,6 +2186,11 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 		char run[] = "run 0000";
 		fmt_hex(run + 4, runs, 4);
 		text_at(50, 1200, run, GREY, DARK, 2);
+		char mhz[] = "CPU 0000 MHz";
+		uint32_t m = cpu_mhz();
+		for (int i = 3; i >= 0; i--, m /= 10)
+			mhz[4 + i] = (char)('0' + m % 10);
+		text_at(330, 1200, mhz, GREY, DARK, 2);
 		int k = wait_tap(menu, 4);
 		if (k == 0)
 			break;
@@ -2155,6 +2212,7 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	}
 	con_clear(DARK);
 	con_str("T290", "booting iPadOS 16");
+	perf_votes();
 	(void)dtb;
 }
 
