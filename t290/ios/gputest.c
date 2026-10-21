@@ -30,7 +30,7 @@ kern_return_t IOConnectMapMemory64(io_connect_t c, uint32_t type, task_port_t ta
     mach_vm_address_t *addr, mach_vm_size_t *size, uint32_t options);
 #define kIOMapAnywhere 1
 
-static FILE *logf;
+static FILE *out_log;
 
 static void
 say(const char *fmt, ...)
@@ -39,11 +39,11 @@ say(const char *fmt, ...)
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
 	va_end(ap);
-	if (logf) {
+	if (out_log) {
 		va_start(ap, fmt);
-		vfprintf(logf, fmt, ap);
+		vfprintf(out_log, fmt, ap);
 		va_end(ap);
-		fflush(logf);
+		fflush(out_log);
 	}
 }
 
@@ -75,7 +75,7 @@ ms_since(uint64_t t0)
 int
 main(void)
 {
-	logf = fopen("/private/var/tmp/gputest.log", "w");
+	out_log = fopen("/private/var/tmp/gputest.log", "w");
 	io_service_t svc = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetGPU"));
 	if (!svc) {
 		say("gputest: no SweetGPU service\n");
