@@ -1,0 +1,21 @@
+diff --git a/bsd/dev/sweet_t290_xfer.c b/bsd/dev/sweet_t290_xfer.c
+index 48d5757..9f7f009 100755
+--- a/bsd/dev/sweet_t290_xfer.c
++++ b/bsd/dev/sweet_t290_xfer.c
+@@ -65,10 +65,15 @@ xfer_put(struct xfer_op *o, uint8_t *buf, vfs_context_t ctx)
+ 		done += bytes - (uint64_t)resid;
+ 	}
+ 	if (!err) {
++		/*
++		 * vnode_open() does not apply O_TRUNC: a shorter file kept the old
++		 * tail (a launchd.plist with 143 stale bytes: "No service cache").
++		 */
+ 		struct vnode_attr va;
+ 		VATTR_INIT(&va);
++		VATTR_SET(&va, va_data_size, (off_t)done);
+ 		VATTR_SET(&va, va_mode, (mode_t)(o->mode & 07777));
+-		(void)vnode_setattr(vp, &va, ctx);
++		err = vnode_setattr(vp, &va, ctx);
+ 	}
+ 	vnode_close(vp, FWRITE, ctx);
+ 	return err ? -err : (int64_t)done;
