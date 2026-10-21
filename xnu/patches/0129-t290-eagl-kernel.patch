@@ -1,0 +1,335 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..70891e8 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -367,6 +367,43 @@ static struct mac_policy_conf sweet_amfi_mac_conf = {
+ 
+ static mac_policy_handle_t sweet_amfi_mac_handle;
+ 
++/*
++ * Policy "AMFI": dyld asks __mac_syscall("AMFI", 90, {u64 in flags, u64
++ * *out flags}) which DYLD_* variables it may honour. Without the policy the
++ * call fails and dyld restricts every process. Allow @paths, path and
++ * print variables, fallback paths, interposing, embedded variables and a
++ * failed insertion (the process keeps running); not a custom shared cache.
++ */
++#define SWEET_AMFI_CHECK_DYLD_POLICY    90
++#define SWEET_AMFI_DYLD_ALLOW           0xfbULL
++
++static int
++sweet_amfi_syscall(__unused struct proc *p, int call, user_addr_t arg)
++{
++	uint64_t args[2];
++	if (call != SWEET_AMFI_CHECK_DYLD_POLICY) {
++		return ENOPOLICY;
++	}
++	int error = copyin(arg, args, sizeof(args));
++	if (error == 0) {
++		uint64_t out = SWEET_AMFI_DYLD_ALLOW;
++		error = copyout(&out, (user_addr_t)args[1], sizeof(out));
++	}
++	return error;
++}
++
++static const struct mac_policy_ops sweet_dyld_mac_ops = {
++	.mpo_policy_syscall = sweet_amfi_syscall,
++};
++
++static struct mac_policy_conf sweet_dyld_mac_conf = {
++	.mpc_name = "AMFI",
++	.mpc_fullname = "SWEET dyld policy",
++	.mpc_ops = &sweet_dyld_mac_ops,
++};
++
++static mac_policy_handle_t sweet_dyld_mac_handle;
++
+ /* Called from bsd_init once MAC policies can register, before any exec. */
+ void sweet_amfi_policy_register(void);
+ 
+@@ -379,5 +416,8 @@ sweet_amfi_policy_register(void)
+ 	error = mac_policy_register(&sweet_sandbox_mac_conf, &sweet_sandbox_mac_handle, NULL);
+ 	printf("SWEET Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
++	error = mac_policy_register(&sweet_dyld_mac_conf, &sweet_dyld_mac_handle, NULL);
++	printf("SWEET AMFI: dyld policy %s (%d)\n",
++	    error ? "NOT registered" : "registered", error);
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index c7d739a..6acce9c 100755
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -10,7 +10,12 @@
+  *   3 Submit   [ib gpu address, dwords] -> [fence seq]
+  *   4 Wait     [seq, timeout ms]           (kIOReturnTimeout)
+  *   5 Fence    -> [last completed seq]
++ *   6 ImportSurface [IOSurface id] -> [handle, gpu address, size]
++ *   7 Log      struct in: text, printed to the kernel log (pstore)
+  * IOConnectMapMemory64(conn, handle, ...) maps a buffer into the task.
++ * Imported surfaces keep their CPU caching: their D-cache lines are cleaned
++ * and invalidated to the point of coherency before every submit and after
++ * every successful wait (the GPU does not snoop).
+  * Buffers are freed with the client; waiting for the GPU before Free is
+  * the caller's job.
+  */
+@@ -20,6 +25,10 @@
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <libkern/c++/OSArray.h>
++#include <sys/proc.h>
++/* osfmk/arm/caches_internal.h: clean + invalidate a VA range to the PoC */
++extern "C" void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
++#include "SweetSurface.h"
+ #include "../../../bsd/dev/sweet_t290_gpu.h"
+ 
+ #define SWEET_GPU_MAX_BUFFERS   4096
+@@ -45,12 +54,19 @@ public:
+ 	    IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
+ private:
+ 	struct Buffer {
+-		IOBufferMemoryDescriptor *md;
++		IOMemoryDescriptor *md;
+ 		uint64_t gpuaddr, size;
++		uintptr_t kva;          /* cached imported surface: flushed around GPU use */
++		bool imported;
+ 	};
+ 	Buffer *fBuf;
+ 	IOLock *fLock;
+ 	IOReturn alloc(uint64_t size, uint64_t *out);
++	IOReturn import_surface(uint32_t id, uint64_t *out);
++	IOReturn map_into_window(IOMemoryDescriptor *md, uint64_t size, uint64_t *va);
++	IOReturn add_buffer(IOMemoryDescriptor *md, uint64_t va, uint64_t size, uintptr_t kva,
++	    bool imported, uint64_t *out);
++	void flush_surfaces(void);
+ 	void release_buffer(uint32_t i);
+ };
+ OSDefineMetaClassAndStructors(SweetGPUUserClient, IOUserClient);
+@@ -105,8 +121,13 @@ SweetGPUUserClient::release_buffer(uint32_t i)
+ 	}
+ 	sweet_gpu_unmap(fBuf[i].gpuaddr, fBuf[i].size);
+ 	sweet_gpu_va_free(fBuf[i].gpuaddr, fBuf[i].size);
++	if (fBuf[i].imported) {
++		fBuf[i].md->complete();
++	}
+ 	fBuf[i].md->release();
+ 	fBuf[i].md = NULL;
++	fBuf[i].kva = 0;
++	fBuf[i].imported = false;
+ }
+ 
+ IOReturn
+@@ -137,22 +158,12 @@ SweetGPUUserClient::free(void)
+ 	IOUserClient::free();
+ }
+ 
++/* Reserve GPU VA for md (size bytes) and map its physical segments there. */
+ IOReturn
+-SweetGPUUserClient::alloc(uint64_t size, uint64_t *out)
++SweetGPUUserClient::map_into_window(IOMemoryDescriptor *md, uint64_t size, uint64_t *vaOut)
+ {
+-	size = (size + 0xfff) & ~0xfffULL;
+-	if (size == 0 || size > 256ULL << 20) {
+-		return kIOReturnBadArgument;
+-	}
+-	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+-	    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMapWriteCombineCache, size, 4096);
+-	if (md == NULL) {
+-		return kIOReturnNoMemory;
+-	}
+-	bzero(md->getBytesNoCopy(), size);
+ 	uint64_t va = sweet_gpu_va_alloc(size);
+ 	if (va == 0) {
+-		md->release();
+ 		return kIOReturnNoSpace;
+ 	}
+ 	for (uint64_t off = 0; off < size;) {
+@@ -161,7 +172,6 @@ SweetGPUUserClient::alloc(uint64_t size, uint64_t *out)
+ 		if (pa == 0 || len == 0) {
+ 			sweet_gpu_unmap(va, off);
+ 			sweet_gpu_va_free(va, size);
+-			md->release();
+ 			return kIOReturnVMError;
+ 		}
+ 		if (len > size - off) {
+@@ -170,12 +180,23 @@ SweetGPUUserClient::alloc(uint64_t size, uint64_t *out)
+ 		sweet_gpu_map(va + off, pa, len);
+ 		off += len;
+ 	}
++	*vaOut = va;
++	return kIOReturnSuccess;
++}
++
++/* Table slot for a mapped buffer; on failure the caller still owns md. */
++IOReturn
++SweetGPUUserClient::add_buffer(IOMemoryDescriptor *md, uint64_t va, uint64_t size, uintptr_t kva,
++    bool imported, uint64_t *out)
++{
+ 	IOLockLock(fLock);
+ 	for (uint32_t i = 0; i < SWEET_GPU_MAX_BUFFERS; i++) {
+ 		if (fBuf[i].md == NULL) {
+ 			fBuf[i].md = md;
+ 			fBuf[i].gpuaddr = va;
+ 			fBuf[i].size = size;
++			fBuf[i].kva = kva;
++			fBuf[i].imported = imported;
+ 			IOLockUnlock(fLock);
+ 			out[0] = i + 1;
+ 			out[1] = va;
+@@ -186,10 +207,96 @@ SweetGPUUserClient::alloc(uint64_t size, uint64_t *out)
+ 	IOLockUnlock(fLock);
+ 	sweet_gpu_unmap(va, size);
+ 	sweet_gpu_va_free(va, size);
+-	md->release();
+ 	return kIOReturnNoResources;
+ }
+ 
++IOReturn
++SweetGPUUserClient::alloc(uint64_t size, uint64_t *out)
++{
++	size = (size + 0xfff) & ~0xfffULL;
++	if (size == 0 || size > 256ULL << 20) {
++		return kIOReturnBadArgument;
++	}
++	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMapWriteCombineCache, size, 4096);
++	if (md == NULL) {
++		return kIOReturnNoMemory;
++	}
++	bzero(md->getBytesNoCopy(), size);
++	uint64_t va = 0;
++	IOReturn ret = map_into_window(md, size, &va);
++	if (ret == kIOReturnSuccess) {
++		ret = add_buffer(md, va, size, 0, false, out);
++	}
++	if (ret != kIOReturnSuccess) {
++		md->release();
++	}
++	return ret;
++}
++
++/*
++ * Map an IOSurface's pixels into the GPU window (render target or texture
++ * without a copy). Buffer surfaces are cached kernel memory: remember their
++ * kernel address for the D-cache maintenance around GPU work.
++ */
++IOReturn
++SweetGPUUserClient::import_surface(uint32_t id, uint64_t *out)
++{
++	SweetSurface *s = sweet_surface_copy(id);
++	if (s == NULL) {
++		return kIOReturnNotFound;
++	}
++	IOMemoryDescriptor *md = s->memory;
++	uint64_t size = ((uint64_t)s->allocSize + 0xfff) & ~0xfffULL;
++	uintptr_t kva = 0;
++	if (md != NULL) {
++		md->retain();
++		if (OSDynamicCast(IOBufferMemoryDescriptor, md) != NULL) {
++			kva = s->kernelAddress();
++		}
++	}
++	s->release();
++	if (md == NULL || size == 0) {
++		OSSafeReleaseNULL(md);
++		return kIOReturnBadArgument;
++	}
++	if (size > md->getLength()) {
++		size = md->getLength() & ~0xfffULL;
++	}
++	IOReturn ret = md->prepare();
++	if (ret != kIOReturnSuccess) {
++		md->release();
++		return ret;
++	}
++	uint64_t va = 0;
++	ret = map_into_window(md, size, &va);
++	if (ret == kIOReturnSuccess) {
++		ret = add_buffer(md, va, size, kva, true, out);
++	}
++	if (ret != kIOReturnSuccess) {
++		md->complete();
++		md->release();
++	}
++	static int logged;
++	if (logged++ < 16) {
++		printf("SWEET GPU: import surface %u -> %#llx + %#llx%s (0x%x)\n", id, va, size,
++		    kva ? " cached" : "", ret);
++	}
++	return ret;
++}
++
++void
++SweetGPUUserClient::flush_surfaces(void)
++{
++	IOLockLock(fLock);
++	for (uint32_t i = 0; i < SWEET_GPU_MAX_BUFFERS; i++) {
++		if (fBuf[i].md != NULL && fBuf[i].kva != 0) {
++			FlushPoC_DcacheRegion(fBuf[i].kva, (size_t)fBuf[i].size);
++		}
++	}
++	IOLockUnlock(fLock);
++}
++
+ IOReturn
+ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
+@@ -200,7 +307,7 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 	const uint64_t *in = args->scalarInput;
+ 	uint32_t nin = args->scalarInputCount;
+ 
+-	if (selector != 0 && !sweet_gpu_ready()) {
++	if (selector != 0 && selector != 7 && !sweet_gpu_ready()) {
+ 		return kIOReturnNotReady;
+ 	}
+ 	switch (selector) {
+@@ -229,6 +336,7 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
++		flush_surfaces();
+ 		out[0] = sweet_gpu_submit(in[0], (uint32_t)in[1]);
+ 		ret = out[0] ? kIOReturnSuccess : kIOReturnError;
+ 		outCount = 1;
+@@ -236,11 +344,33 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 	case 4:
+ 		ret = nin < 2 ? kIOReturnBadArgument :
+ 		    (sweet_gpu_wait((uint32_t)in[0], (uint32_t)in[1]) == 0 ? kIOReturnSuccess : kIOReturnTimeout);
++		if (ret == kIOReturnSuccess) {
++			flush_surfaces();
++		}
+ 		break;
+ 	case 5:
+ 		out[0] = sweet_gpu_fence();
+ 		outCount = 1;
+ 		break;
++	case 6:
++		ret = nin >= 1 ? import_surface((uint32_t)in[0], out) : kIOReturnBadArgument;
++		outCount = 3;
++		break;
++	case 7: {
++		/* a user-space log line into the kernel log: the pstore keeps it */
++		uint32_t len = args->structureInputSize;
++		if (args->structureInput == NULL || len == 0) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		if (len > 1000) {
++			len = 1000;
++		}
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		printf("%s: %.*s\n", name, (int)len, (const char *)args->structureInput);
++		break;
++	}
+ 	default:
+ 		ret = kIOReturnUnsupported;
+ 		break;
+@@ -258,7 +388,7 @@ SweetGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMe
+ 		return kIOReturnBadArgument;
+ 	}
+ 	IOLockLock(fLock);
+-	IOBufferMemoryDescriptor *md = fBuf[type - 1].md;
++	IOMemoryDescriptor *md = fBuf[type - 1].md;
+ 	if (md != NULL) {
+ 		md->retain();
+ 	}
