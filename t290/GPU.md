@@ -208,3 +208,13 @@ of the msm DRM ioctls; a small frontend modelled on gallium osmesa that
 makes st contexts on the freedreno screen (later the EAGL shim for
 backboardd). First target: a GLES triangle into a buffer, read back.
 Build: macOS CI, meson cross file for iphoneos arm64.
+
+## Mesa Freedreno for iPadOS (2026-10-21): builds
+t290/mesa: Mesa 24.2.8 + patches 0001 (freedreno "sweet" drm backend over
+SweetGPU, Darwin build of src/freedreno/drm, A504 = GPUId 504, ir3 disk-cache
+id via dladdr) and 0002 (OSMesa creates the Freedreno screen on FD_SWEET_FD,
+renderonly stubs, IOKit link), overlay src/freedreno/drm/sweet, stubs for
+libdrm and sys/sysinfo.h; CI mesa-ios (macos-14, meson 1.5.2, brew bison).
+Output: libOSMesa.8.dylib (desktop GL; GLES2 needs shared glapi, later) and
+t290/mesa/test/gltri (triangle + 100 frames + PPM), installed in /usr/lib
+and /usr/bin with t290-xfer, started by launchd job com.t290.gltri.
