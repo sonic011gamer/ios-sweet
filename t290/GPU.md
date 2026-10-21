@@ -192,3 +192,19 @@ ran from the ring and the CACHE_FLUSH_TS fence landed. SweetGPU (IOKit,
 IOResources) offers info/alloc+map/free/submit/wait/fence to user space.
 Next: an iOS user-space test of SweetGPU (needs an iOS arm64 build path and
 a way to put files on the HFS root), then Mesa Freedreno's winsys on it.
+
+## User space reaches the GPU (2026-10-21): gputest on iPadOS
+`t290/ios/gputest.c` (CI ios-tools, ad-hoc signed), copied with
+`t290/tools/t290-xfer.ps1` (patch 0125), started by a launchd job
+(`t290/tools/launchd-add-job.py`, original kept as
+/System/Library/xpc/launchd.plist.t290orig), output via /dev/console:
+`OK, THE GPU RAN OUR BUFFER in 0.078 ms`, `1000 submit+wait round trips in
+52.3 ms`. SweetGPU alloc + IOConnectMapMemory64 + submit + fence all work.
+
+Next: Mesa Freedreno for iOS. Plan: Mesa 24.2 gallium freedreno (a5xx) +
+the GL/GLES state tracker; a new src/freedreno/drm backend over SweetGPU
+(fd_device/fd_pipe/fd_bo/fd_submit: alloc+map, submit, fence wait) instead
+of the msm DRM ioctls; a small frontend modelled on gallium osmesa that
+makes st contexts on the freedreno screen (later the EAGL shim for
+backboardd). First target: a GLES triangle into a buffer, read back.
+Build: macOS CI, meson cross file for iphoneos arm64.
