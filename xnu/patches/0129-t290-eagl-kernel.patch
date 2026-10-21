@@ -333,3 +333,16 @@ index c7d739a..6acce9c 100755
  	if (md != NULL) {
  		md->retain();
  	}
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 7f90c56..4527903 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -62,7 +62,7 @@ enum {
+ #define SWEET_SURFACE_MAX_DIM           16384
+ #define SWEET_SURFACE_MAX_ALLOC         (256u << 20)
+ #define SWEET_SURFACE_MAX_PROPS         (64u << 10)
+-#define SWEET_SURFACE_ROW_ALIGN         64
++#define SWEET_SURFACE_ROW_ALIGN         256     /* GPU import: 64 px of 4 bytes */
+ #define SWEET_SURFACE_TIMESTAMPS        0x800   /* offset in the state page */
+ #define SWEET_SURFACE_STATE_SEED        0xc     /* u32 in the state page */
+ #define kIOSurfaceLockReadOnly          0x1
