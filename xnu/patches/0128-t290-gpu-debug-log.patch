@@ -1,0 +1,35 @@
+diff --git a/bsd/dev/sweet_t290_gpu.c b/bsd/dev/sweet_t290_gpu.c
+index 9169a32..c800218 100755
+--- a/bsd/dev/sweet_t290_gpu.c
++++ b/bsd/dev/sweet_t290_gpu.c
+@@ -272,6 +272,9 @@ sweet_gpu_submit(uint64_t ib_va, uint32_t dwords)
+ 	ring_out(seq);
+ 	ring_kick();
+ 	IOLockUnlock(gpu_lock);
++	if (seq <= 64) {
++		printf("SWEET GPU: submit %u ib %#llx %u dwords\n", seq, ib_va, dwords);
++	}
+ 	return seq;
+ }
+ 
+@@ -281,8 +284,18 @@ sweet_gpu_wait(uint32_t seq, uint32_t timeout_ms)
+ 	if (!gpu_up) {
+ 		return -1;
+ 	}
+-	for (uint32_t us = 0; (int32_t)(*gpu_fence_cpu - seq) < 0; us += 50) {
+-		if (us >= timeout_ms * 1000) {
++	for (uint64_t us = 0; (int32_t)(*gpu_fence_cpu - seq) < 0; us += 50) {
++		if (us >= (uint64_t)timeout_ms * 1000) {
++			static uint32_t reported, nreports;
++			if (reported != seq && nreports < 32) {
++				reported = seq;
++				nreports++;
++				volatile uint32_t *cb = (volatile uint32_t *)gpu_cb;
++				printf("SWEET GPU: wait seq %u timed out: fence %u rptr %u wptr %u status %#x "
++				    "hwfault %#x int0 %#x cb0 fsr %#x far %#x\n", seq, *gpu_fence_cpu,
++				    gpu_rd(CP_RB_RPTR), ring_wptr, gpu_rd(RBBM_STATUS), gpu_rd(0xb1a),
++				    gpu_rd(0x4e1), cb[0x58 / 4], cb[0x60 / 4]);
++			}
+ 			return -1;
+ 		}
+ 		delay(50);

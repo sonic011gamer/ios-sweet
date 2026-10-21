@@ -64,6 +64,7 @@ main(void)
 	signal(SIGALRM, on_alarm);
 	alarm(60);
 	setenv("FD_MESA_DEBUG", "msgs", 1);
+	setenv("MESA_LOG_FILE", "/private/var/tmp/mesa.log", 1);
 	STEP("dlopen");
 	void *h = dlopen("/usr/lib/libOSMesa.8.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!h) {
