@@ -64,15 +64,17 @@ def child(n, name):
     raise SystemExit(f'mkadt.py tree has no {name!r} node')
 
 
-def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1):
+def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1, native=False):
     root = mkadt.build(qemu=qemu)
     gicd, gicc, timebase, vtimer = ((QEMU_GICD, QEMU_GICC, QEMU_TIMEBASE, QEMU_VTIMER_INTID)
                                     if qemu else (GICD, GICC, TIMEBASE, VTIMER_INTID))
 
     # iPad 5: @2x, A9 chip id (s8000); other /chosen entries as for sweet.
+    # --native: the panel's own 800x1280 at @1x (kernel boot-arg t290native=1),
+    # no scaling and 2.5x fewer pixels for the CPU renderer than 1536x2048.
     set_props(child(root, 'chosen'), dram_base=u64(PHYS_BASE), dram_size=u64(MEM_SIZE),
               firmware_version=cstr('t290-shim'), system_firmware_version=cstr('t290-shim'),
-              display_scale=u32(2), chip_id=u32(0x8000))
+              display_scale=u32(1 if native else 2), chip_id=u32(0x8000))
 
     gic = child(child(root, 'arm-io'), 'gic')
     set_props(gic, compatible=cstr('arm,gic-400') + cstr('arm,cortex-a7-gic'),
@@ -111,7 +113,8 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1):
         set_props(child(root, 'sweet-fbcon'), reg=u64(FB, FB_SIZE), width=u32(fb_w),
                   height=u32(fb_h), stride=u32(fb_w * FB_BPP), bpp=u32(FB_BPP),
                   shift=u32(FB_SHIFT))
-    set_props(child(child(root, 'arm-io'), 'disp0'), canvas_width=u32(1536), canvas_height=u32(2048))
+    set_props(child(child(root, 'arm-io'), 'disp0'), canvas_width=u32(FB_W if native else 1536),
+              canvas_height=u32(FB_H if native else 2048))
 
     # Home-button iPad: no home-button-type (0 = Home button), J71sAP's names.
     buttons = child(root, 'buttons')
@@ -147,7 +150,7 @@ if __name__ == '__main__':
     fb = sys.argv[sys.argv.index('--fb') + 1] if '--fb' in sys.argv else f'{FB_W}x{FB_H}'
     w, h = (int(x) for x in fb.split('x'))
     smp = int(sys.argv[sys.argv.index('--smp') + 1]) if '--smp' in sys.argv else 1
-    root = build(qemu='--qemu' in sys.argv, fb_w=w, fb_h=h, qemu_cpus=smp)
+    root = build(qemu='--qemu' in sys.argv, fb_w=w, fb_h=h, qemu_cpus=smp, native='--native' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

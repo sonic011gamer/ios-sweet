@@ -1,0 +1,91 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 52401c1..d23a1bc 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -59,7 +59,8 @@ extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
+  * SM-T290: LK leaves an 800x1280 RGB888 splash (bytes R,B,G) that the panel
+  * scans out shifted right with wrap-around (t290/shim/diag.c). The GUI draws
+  * into a 1536x2048 BGRA shadow, the iPad 5 panel; each flush halves it and
+- * centres the 768x1024 result on the panel.
++ * centres the 768x1024 result on the panel. With t290native=1 the shadow is
++ * the panel's own 800x1280 (@1x in the ADT) and each flush copies it 1:1.
+  */
+ #define T290_SHADOW_W   1536u
+ #define T290_SHADOW_H   2048u
+@@ -136,6 +137,8 @@ public:
+ 	uintptr_t     fPanel;         /* write-combined mapping of the splash */
+ 	uint32_t      fPanelW, fPanelH, fPanelRow, fPanelShift;
+ 	bool          fPanelCleared;
++	bool          fNative;        /* t290native=1: shadow = panel size, 1:1 */
++	uint8_t      *fRowBuf;        /* one converted panel row (native) */
+ 	IOBufferMemoryDescriptor *fShadow;
+ 	bool t290Setup(void);
+ 	void t290Panel(void);
+@@ -459,23 +462,31 @@ AppleCLCD::t290Setup(void)
+ 	    *val < fPanelW) {
+ 		fPanelShift = *val;
+ 	}
+-	if (fPanelW < T290_SHADOW_W / 2 || fPanelH < T290_SHADOW_H / 2) {
++	int native = 0;
++	PE_parse_boot_argn("t290native", &native, sizeof(native));
++	fNative = native != 0;
++	uint32_t shW = fNative ? fPanelW : T290_SHADOW_W;
++	uint32_t shH = fNative ? fPanelH : T290_SHADOW_H;
++	if (!fNative && (fPanelW < T290_SHADOW_W / 2 || fPanelH < T290_SHADOW_H / 2)) {
+ 		return false;
+ 	}
+ 	fPanel = ml_io_map_wcomb((vm_offset_t)fPhys, (vm_size_t)fPanelRow * fPanelH);
+ 	fShadow = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+ 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+-	    (vm_size_t)T290_SHADOW_W * T290_SHADOW_H * 4, 0x00000000fffff000ULL);
+-	if (fPanel == 0 || fShadow == NULL) {
++	    (vm_size_t)shW * shH * 4, 0x00000000fffff000ULL);
++	if (fNative) {
++		fRowBuf = (uint8_t *)IOMalloc(fPanelW * 3);
++	}
++	if (fPanel == 0 || fShadow == NULL || (fNative && fRowBuf == NULL)) {
+ 		return false;
+ 	}
+ 	bzero(fShadow->getBytesNoCopy(), fShadow->getLength());
+ 	fPhys = fShadow->getPhysicalAddress();
+ 	/* the IOSurface maps the shadow again: no dirty lines of this alias may linger */
+ 	flush_dcache64((addr64_t)fPhys, (unsigned)fShadow->getLength(), TRUE);
+-	fWidth = T290_SHADOW_W;
+-	fHeight = T290_SHADOW_H;
+-	fRowBytes = T290_SHADOW_W * 4;
++	fWidth = shW;
++	fHeight = shH;
++	fRowBytes = shW * 4;
+ 	fT290 = true;
+ 	IOLog("SWEET FB: T290 panel %ux%u RGB888 shift %u, GUI on a %ux%u shadow at 0x%llx\n",
+ 	    fPanelW, fPanelH, fPanelShift, fWidth, fHeight, fPhys);
+@@ -486,6 +497,29 @@ AppleCLCD::t290Setup(void)
+ void
+ AppleCLCD::t290Panel(void)
+ {
++	if (fNative) {
++		/*
++		 * 1:1. Screen x >= shift lives at buffer x - shift on the same row,
++		 * screen x < shift wraps to the end of the row above: two runs.
++		 */
++		uint32_t n = fPanelW * 3, sh = fPanelShift * 3;
++		for (uint32_t y = 0; y < fPanelH; y++) {
++			const uint32_t *src = (const uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++			uint8_t *t = fRowBuf;
++			for (uint32_t x = 0; x < fPanelW; x++, t += 3) {
++				uint32_t v = src[x];
++				t[0] = (uint8_t)(v >> 16);      /* R */
++				t[1] = (uint8_t)v;              /* B */
++				t[2] = (uint8_t)(v >> 8);       /* G */
++			}
++			uint8_t *row = (uint8_t *)(fPanel + (uint64_t)y * fPanelRow);
++			bcopy(fRowBuf + sh, row, n - sh);
++			if (y > 0 && sh != 0) {
++				bcopy(fRowBuf, row - fPanelRow + (n - sh), sh);
++			}
++		}
++		return;
++	}
+ 	uint32_t outW = fWidth / 2, outH = fHeight / 2;
+ 	uint32_t ox = (fPanelW - outW) / 2, oy = (fPanelH - outH) / 2;
+ 
