@@ -15,6 +15,7 @@ size_t IOSurfaceGetHeight(IOSurfaceRef surface);
 size_t IOSurfaceGetPlaneCount(IOSurfaceRef surface);
 size_t IOSurfaceGetBytesPerRow(IOSurfaceRef surface);
 size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef surface, size_t plane);
+size_t IOSurfaceGetHeightOfPlane(IOSurfaceRef surface, size_t plane);
 uint32_t IOSurfaceGetSeed(IOSurfaceRef surface);
 int IOSurfaceLock(IOSurfaceRef surface, uint32_t options, uint32_t *seed);
 int IOSurfaceUnlock(IOSurfaceRef surface, uint32_t options, uint32_t *seed);

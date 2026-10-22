@@ -89,6 +89,12 @@ t290_format(uint32_t fourcc, unsigned *internalformat)
    case 0x4c413038: /* 'LA08' */
       *internalformat = GL_LUMINANCE8_ALPHA8;
       return PIPE_FORMAT_L8A8_UNORM;
+   case 0x52473838: /* 'RG88': chroma plane of a 4:2:0 IOSurface (EAGL) */
+      *internalformat = GL_RG8;
+      return PIPE_FORMAT_R8G8_UNORM;
+   case 0x52303038: /* 'R008': luma plane */
+      *internalformat = GL_R8;
+      return PIPE_FORMAT_R8_UNORM;
    default:
       return PIPE_FORMAT_NONE;
    }

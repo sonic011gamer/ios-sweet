@@ -48,6 +48,9 @@ special = {
     'disable': 't290_disable',
     'scissor': 't290_scissor',
     'viewport': 't290_viewport',
+    'tex_image2D': 't290_tex_image2d',
+    'compressed_tex_image2D': 't290_compressed_tex_image2d',
+    'generate_mipmap_EXT': 't290_generate_mipmap',
 }
 # GL calls writing the draw framebuffer -> rows they can touch (eaglshim.m)
 draw_calls = {
@@ -81,6 +84,7 @@ for i, member in enumerate(x.strip() for x in body.split(';') if x.strip()):
     candidates = [aliases.get(name), normal.get(key), normal.get(name.replace('_', '').lower())]
     candidates = list(dict.fromkeys(x for x in candidates if x))
     out.append(f'static {ret} gli_{i}(GLIContext ctx' + (', ' + args if params else '') + ') {')
+    out.append('  T290_GL_TIMER;')
     out.append('  t290_make_current(ctx);')
     if name in draw_calls:
         out.append(f'  t290_before_draw({draw_calls[name]});')

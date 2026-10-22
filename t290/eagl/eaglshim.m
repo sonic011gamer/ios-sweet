@@ -60,6 +60,9 @@ static struct {
     void (*Scissor)(GLint, GLint, GLsizei, GLsizei), (*Viewport)(GLint, GLint, GLsizei, GLsizei);
     void (*EGLImageTargetTexture2DOES)(GLenum, void *);
     void (*EGLImageTargetRenderbufferStorageOES)(GLenum, void *);
+    void (*TexParameteri)(GLenum, GLenum, GLint), (*GenerateMipmap)(GLenum);
+    void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+    void (*CompressedTexImage2D)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *);
 } gl;
 
 static void plog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -122,7 +125,7 @@ static const struct { const void *replacement, *original; } surface_interpose[] 
 @interface T290SurfaceImage : NSObject {
 @public
     IOSurfaceRef source, backing;
-    size_t rows, rowBytes, sourceStride, backingStride;
+    size_t rows, rowBytes, sourceStride, sourceOffset, backingStride;
     size_t dirtyStart, dirtyEnd;        /* GPU-written rows not yet published */
     void *image;
     uint32_t seed;
@@ -133,7 +136,7 @@ static const struct { const void *replacement, *original; } surface_interpose[] 
 @end
 
 static struct {
-    uint64_t publishBytes, uploadBytes, waitTicks, frameT0;
+    uint64_t publishBytes, uploadBytes, waitTicks, frameT0, glTicks, copyTicks;
     unsigned frames, uploads;
 } stats;
 
@@ -162,13 +165,15 @@ static inline void image_mark(T290SurfaceImage *img, size_t y0, size_t y1)
     if (!backing) return;
     /* GPU results not yet copied out must not be lost to an older copy. */
     [self publish];
-    const uint8_t *p = IOSurfaceGetBaseAddress(source);
+    uint64_t t0 = mach_absolute_time();
+    const uint8_t *p = (const uint8_t *)IOSurfaceGetBaseAddress(source) + sourceOffset;
     uint8_t *q = IOSurfaceGetBaseAddress(backing);
     seed = IOSurfaceGetSeed(source);
     for (size_t y = 0; y < rows; y++)
         memcpy(q + y * backingStride, p + y * sourceStride, rowBytes);
     stats.uploadBytes += rows * rowBytes;
     stats.uploads++;
+    stats.copyTicks += mach_absolute_time() - t0;
 }
 /* Caller has waited for the GPU writes. */
 - (void)publish
@@ -179,11 +184,13 @@ static inline void image_mark(T290SurfaceImage *img, size_t y0, size_t y1)
     dirtyStart = SIZE_MAX;
     dirtyEnd = 0;
     if (!backing || y0 >= y1) return;
-    uint8_t *p = IOSurfaceGetBaseAddress(source);
+    uint64_t t0 = mach_absolute_time();
+    uint8_t *p = (uint8_t *)IOSurfaceGetBaseAddress(source) + sourceOffset;
     const uint8_t *q = IOSurfaceGetBaseAddress(backing);
     for (size_t y = y0; y < y1; y++)
         memcpy(p + y * sourceStride, q + y * backingStride, rowBytes);
     stats.publishBytes += (y1 - y0) * rowBytes;
+    stats.copyTicks += mach_absolute_time() - t0;
 }
 - (void)dealloc {
     if (image) mesa_image_destroy(image);
@@ -199,6 +206,7 @@ static inline void image_mark(T290SurfaceImage *img, size_t y0, size_t y1)
 @property(nonatomic, strong) NSMapTable<NSString *, T290SurfaceImage *> *surfaces;
 @property(nonatomic, strong) NSMutableSet<T290SurfaceImage *> *dirty;   /* padded, GPU-written */
 @property(nonatomic, weak) T290SurfaceImage *display;                  /* padded surface 1 */
+@property(nonatomic, strong) NSMutableIndexSet *mipmapped;             /* textures with levels > 0 */
 @end
 @implementation T290Sharegroup
 - (void)dealloc { if (_root) mesa_destroy(_root); }
@@ -221,6 +229,7 @@ enum { DRAW_PRIMITIVES, DRAW_CLEAR, DRAW_ALL_ROWS };
     GLuint _boundName[T290_UNITS], _unit, _units;
     GLint _viewport[4], _scissor[4];
     BOOL _viewportKnown, _scissorKnown, _scissorOn;
+    int _maxLevelState;                 /* 0 unknown, 1 TEXTURE_MAX_LEVEL usable, 2 not */
     uint64_t _waitTicks;
     unsigned _waitCount, _flushCount, _drawCount;
     struct { void *renderer; void *dispatch[1100]; } _macro;
@@ -358,10 +367,13 @@ static void frame_stats(T290Context *ctx)
     }
     if (stats.frames < 301) return;
     double ms = ticks_ms(now - stats.frameT0);
-    plog("t290eagl: %.1f fps over 300 frames; per frame: GPU wait %.1fms, copy-out %zuKB, "
-         "copy-in %zuKB (%u uploads), draws %u flushes %u",
-        300e3 / ms, ticks_ms(stats.waitTicks) / 300, (size_t)(stats.publishBytes / 300 / 1024),
-        (size_t)(stats.uploadBytes / 300 / 1024), stats.uploads, ctx->_drawCount, ctx->_flushCount);
+    /* frame time = GL calls (Mesa CPU work incl. GPU waits and copies) + the rest (CA) */
+    plog("t290eagl: %.1f fps over 300 frames; per frame %.1fms: GL calls %.1fms (GPU wait %.1fms, "
+         "copies %.1fms: out %zuKB in %zuKB, %u uploads), outside GL %.1fms; draws %u flushes %u",
+        300e3 / ms, ms / 300, ticks_ms(stats.glTicks) / 300, ticks_ms(stats.waitTicks) / 300,
+        ticks_ms(stats.copyTicks) / 300, (size_t)(stats.publishBytes / 300 / 1024),
+        (size_t)(stats.uploadBytes / 300 / 1024), stats.uploads,
+        (ms - ticks_ms(stats.glTicks)) / 300, ctx->_drawCount, ctx->_flushCount);
     memset(&stats, 0, sizeof(stats));
     stats.frames = 1;
     stats.frameT0 = now;
@@ -575,7 +587,10 @@ static void t290_delete_textures(GLsizei n, const GLuint *names)
         dirty |= img->gpuDirty;
     }
     if (dirty) t290_finish();
-    for (GLsizei i = 0; i < n; i++) [ctx.sharegroup.textures removeObjectForKey:@(names[i])];
+    for (GLsizei i = 0; i < n; i++) {
+        [ctx.sharegroup.textures removeObjectForKey:@(names[i])];
+        [ctx.sharegroup.mipmapped removeIndex:names[i]];
+    }
     forget_images(ctx, gone);
     gl.DeleteTextures(n, names);
 }
@@ -588,6 +603,82 @@ static void t290_delete_renderbuffers(GLsizei n, const GLuint *names)
     }
     for (GLsizei i = 0; i < n; i++) [ctx.sharegroup.renderbuffers removeObjectForKey:@(names[i])];
     gl.DeleteRenderbuffers(n, names);
+}
+
+/* Time spent inside GL calls (generated adapters), for the frame statistics. */
+static inline void gl_timer_end(uint64_t *t0) { stats.glTicks += mach_absolute_time() - *t0; }
+#define T290_GL_TIMER __attribute__((cleanup(gl_timer_end))) uint64_t gl_t0 = mach_absolute_time()
+
+/*
+ * GLES samples a texture whose minification filter needs mipmaps it does not
+ * have as black/transparent, without any GL error. CA's trilinear layers
+ * (icons, wallpaper) hit this with single-level uploads and IOSurfaces, which
+ * Apple's driver evidently tolerates. Clamp such textures to level 0 until
+ * the client defines further levels or generates them.
+ */
+static void set_max_level(T290Context *ctx, GLenum target, GLint level)
+{
+    if (!ctx->_maxLevelState) {
+        const char *ext = (const char *)gl.GetString(0x1f03);
+        ctx->_maxLevelState = ctx.API >= 3 || (ext && strstr(ext, "GL_APPLE_texture_max_level")) ? 1 : 2;
+    }
+    if (ctx->_maxLevelState != 1) return;
+    GLenum pending = gl.GetError();      /* keep the client's error for its glGetError */
+    if (pending >= 0x500 && pending < 0x520) ctx->_errors |= 1u << (pending - 0x500);
+    gl.TexParameteri(target, 0x813d, level);
+    gl.GetError();
+}
+static void tex_level_defined(GLenum target, GLint level)
+{
+    if (target != 0x0de1) return;
+    T290Context *ctx = current_ctx();
+    GLint name = 0;
+    gl.GetIntegerv(0x8069, &name);
+    if (level > 0) {
+        if (![ctx.sharegroup.mipmapped containsIndex:name]) {
+            [ctx.sharegroup.mipmapped addIndex:name];
+            set_max_level(ctx, target, 1000);
+        }
+    }
+    else if (![ctx.sharegroup.mipmapped containsIndex:name]) set_max_level(ctx, target, 0);
+}
+static void log_upload_format(const char *what, GLenum a, GLenum b, GLenum c)
+{
+    static uint32_t seen[48];
+    static unsigned n;
+    uint32_t key = (a & 0xffff) ^ (b << 16) ^ (c << 8);
+    for (unsigned i = 0; i < n; i++) if (seen[i] == key) return;
+    if (n < 48) {
+        seen[n++] = key;
+        plog("t290eagl: %s internal %#x format %#x type %#x", what, a, b, c);
+    }
+}
+static void t290_tex_image2d(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h,
+    GLint border, GLenum format, GLenum type, const GLvoid *pixels)
+{
+    gl.TexImage2D(target, level, internal, w, h, border, format, type, pixels);
+    tex_level_defined(target, level);
+    log_upload_format("texture upload", internal, format, type);
+}
+static void t290_compressed_tex_image2d(GLenum target, GLint level, GLenum internal, GLsizei w,
+    GLsizei h, GLint border, GLsizei size, const GLvoid *data)
+{
+    current_ctx()->_gpuWork = YES;
+    gl.CompressedTexImage2D(target, level, internal, w, h, border, size, data);
+    tex_level_defined(target, level);
+    log_upload_format("compressed upload", internal, 0, 0);
+}
+static void t290_generate_mipmap(GLenum target)
+{
+    T290Context *ctx = current_ctx();
+    ctx->_gpuWork = YES;
+    if (target == 0x0de1) {
+        GLint name = 0;
+        gl.GetIntegerv(0x8069, &name);
+        [ctx.sharegroup.mipmapped addIndex:name];
+        set_max_level(ctx, target, 1000);
+    }
+    gl.GenerateMipmap(target);
 }
 
 #include "dispatch_generated.h"
@@ -611,6 +702,7 @@ static uintptr_t unsupported_private(void *ctx, ...)
         group.renderbuffers = [NSMutableDictionary dictionary];
         group.surfaces = [NSMapTable strongToWeakObjectsMapTable];
         group.dirty = [NSMutableSet set];
+        group.mipmapped = [NSMutableIndexSet indexSet];
     }
     _sharegroup = group;
     _framebuffers = [NSMutableDictionary dictionary];
@@ -667,6 +759,20 @@ static uintptr_t unsupported_private(void *ctx, ...)
         if (count++ < 12) plog("t290eagl: inferred fmt %#x for surface %u (internal %#x format %#x type %#x)",
             fourcc, IOSurfaceGetID(surface), internal, format, type);
     }
+    if (planes) {
+        /* 4:2:0 video/wallpaper surfaces ('420f'...): CA samples each plane
+         * as its own texture and converts YCbCr in its shader. */
+        uint32_t pf = format == 0x1903 || format == 0x1909 ? 0x52303038 :   /* R8 */
+            format == 0x8227 ? 0x52473838 :                                  /* RG8 */
+            format == 0x190a ? 0x4c413038 : 0;                               /* LA8 */
+        static unsigned n;
+        if (n++ < 16 || !pf)
+            plog("t290eagl: plane %u of surface %u fmt %#x %dx%d stride %zu offset %zu: GL internal %#x "
+                 "format %#x type %#x -> %#x", plane, IOSurfaceGetID(surface), fourcc, w, h, stride,
+                 (size_t)offset, internal, format, type, pf);
+        if (!pf) return NO;
+        fourcc = pf;
+    }
     GLint name = 0;
     gl.GetIntegerv(target == 0x8d41 ? 0x8ca7 : 0x8069, &name);
     if (name <= 0) return NO;
@@ -679,15 +785,17 @@ static uintptr_t unsupported_private(void *ctx, ...)
         mirror->source = (IOSurfaceRef)CFRetain(surface);
     }
     /* Freedreno's import pitch: 64 pixels (cpp 4: 256 bytes, LA08: 128). */
-    size_t bpe = fourcc == 0x4c413038 ? 2 :
-        (fourcc == 0x4c303038 || fourcc == 0x41303038) ? 1 :
+    size_t bpe = fourcc == 0x4c413038 || fourcc == 0x52473838 ? 2 :
+        (fourcc == 0x4c303038 || fourcc == 0x41303038 || fourcc == 0x52303038) ? 1 :
         (fourcc == 0x42475241 || fourcc == 0x52474241) ? 4 : 0;
-    if (!mirror->image && !planes && bpe && (stride % (64 * bpe))) {
-        if ((size_t)w > SIZE_MAX / bpe || (size_t)h > IOSurfaceGetHeight(surface) ||
+    if (!mirror->image && bpe && (stride % (64 * bpe))) {
+        size_t height = planes ? IOSurfaceGetHeightOfPlane(surface, plane) : IOSurfaceGetHeight(surface);
+        if ((size_t)w > SIZE_MAX / bpe || (size_t)h > height ||
             (size_t)w * bpe > stride || !IOSurfaceGetBaseAddress(surface)) return NO;
         mirror->rows = h;
         mirror->rowBytes = (size_t)w * bpe;
         mirror->sourceStride = stride;
+        mirror->sourceOffset = offset;
         mirror->backing = IOSurfaceCreate((__bridge CFDictionaryRef)@{
             (__bridge id)kIOSurfaceWidth: @(w), (__bridge id)kIOSurfaceHeight: @(h),
             (__bridge id)kIOSurfaceBytesPerElement: @(bpe),
@@ -715,14 +823,18 @@ static uintptr_t unsupported_private(void *ctx, ...)
         mirror->image = mesa_image(IOSurfaceGetID(imported), w, h, (uint32_t)stride,
             (uint32_t)offset, fourcc);
         if (!mirror->image) {
-            plog("t290eagl: import FAILED id %u %dx%d stride %zu fourcc %#x plane %u",
-                IOSurfaceGetID(surface), w, h, stride, (unsigned)IOSurfaceGetPixelFormat(surface), plane);
+            plog("t290eagl: import FAILED id %u %dx%d stride %zu offset %zu fourcc %#x (surface %#x) plane %u",
+                IOSurfaceGetID(surface), w, h, stride, (size_t)offset, fourcc,
+                (unsigned)IOSurfaceGetPixelFormat(surface), plane);
             return NO;
         }
         [_sharegroup.surfaces setObject:mirror forKey:key];
     }
     if (target == 0x8d41) gl.EGLImageTargetRenderbufferStorageOES(target, mirror->image);
-    else gl.EGLImageTargetTexture2DOES(target, mirror->image);
+    else {
+        gl.EGLImageTargetTexture2DOES(target, mirror->image);
+        set_max_level(self, target, 0);     /* an IOSurface has no mipmaps */
+    }
     images[@(name)] = mirror;
     uint64_t attachmentName = (uint64_t)(GLuint)name | (target == 0x8d41 ? 0x100000000ull : 0);
     for (NSNumber *fbo in _attachmentNames)
@@ -806,7 +918,8 @@ __attribute__((constructor)) static void bridge_init(void)
         !LOAD(DeleteFramebuffers) || !LOAD(BindTexture) || !LOAD(DeleteTextures) ||
         !LOAD(DeleteRenderbuffers) || !LOAD(ActiveTexture) || !LOAD(Enable) || !LOAD(Disable) ||
         !LOAD(Scissor) || !LOAD(Viewport) || !LOAD(EGLImageTargetTexture2DOES) ||
-        !LOAD(EGLImageTargetRenderbufferStorageOES)) {
+        !LOAD(EGLImageTargetRenderbufferStorageOES) || !LOAD(TexParameteri) || !LOAD(GenerateMipmap) ||
+        !LOAD(TexImage2D) || !LOAD(CompressedTexImage2D)) {
         plog("t290eagl: incompatible Mesa: GL entry point missing");
         mesa_create = NULL;
         return;

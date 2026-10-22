@@ -136,7 +136,8 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
     CALL(98, void, (void *, GLsizei, GLuint *), 1, &tex);
     CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
     if (![ctx attachImage:0x0de1 toCoreSurface:s invertedRender:NO]) return 31;
-    CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2801, 0x2600);
+    /* trilinear on a single-level IOSurface texture, as CA does for icons */
+    CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2801, 0x2703);
     CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2800, 0x2600);
     const char *sources[] = {
         "attribute vec2 position; varying vec2 uv; void main(){uv=position*0.5+0.5;gl_Position=vec4(position,0.0,1.0);}",
