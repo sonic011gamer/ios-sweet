@@ -37,6 +37,21 @@
   trailing whitespace (`void `). Fix178794f normalizes them, which also
   makes diagnostic hooks reachable after void calls. Framebuffer attachment
   tracking now follows image storage replacement after an FBO was attached.
+- **CI39744887745 PASSED**, commit5d22e0c: all3 jobs, iOS build and mac fake
+  ES2/ES3 alias/seed/GL checks. Earlier CI39744753980 (178794f) also passed.
+  **Bridge6 STAGED**, not yet verified on hardware. Files `dl/eagl-bridge6`:
+  bridge429264 bytes SHA256 a66a72c321b005a333b7c4cf7f4aaecef5ea8c7bd6115a5080672aba6f053e2f;
+  test88720 bytes SHA256 195b1a5366e04698e2cf6ec4ee5866a0757f694a0fbffff841f8ab77d12c8c15.
+- **Pending SD request4 ops:** get previous log to
+  `dl/eagl-bridge6/eagl5.before.log`, get active bridge to
+  `dl/eagl-bridge6/bridge.before.dylib`, put new
+  `/usr/lib/t290eagl-mesa.dylib` and `/usr/bin/eagltest` (mode755).
+  Entire34118288-byte staged request read back from actual SD and SHA256
+  verified17440700cbf91e88103b93f0088cf1e00372e1e5e7db1924f763a4f31ac022bb.
+  User asked to boot manually, inspect speed/completeness after~3minutes,
+  then return to Android. Next: pull fresh pstore, xfer-Result; check alias
+  pixel tests, GL error diagnostics, GPU wait times and actual user report.
+  Do not claim artifacts or slowness resolved before this hardware test.
 
 ### Previous bridge5 preparation
 

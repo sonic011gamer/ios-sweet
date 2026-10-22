@@ -2,8 +2,9 @@
 
 **Active SM-T290 work (2026-10-22):** see `t290/NOTES.md` and `t290/GPU.md`.
 Mesa ES2/ES3 GPU pixel tests pass. Kernel 0130 lets the compositor display
-an image, but the UI is incomplete and freezes. The active fix covers
-unaligned IOSurface rows, format-less scratch surfaces and object fences.
+an image, but the UI is incomplete and slow. Bridge5's row-layout pixel
+tests pass on hardware; bridge6 with shared surface storage and fewer
+GPU waits is staged for the next manual boot. See active t290 handoff.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
