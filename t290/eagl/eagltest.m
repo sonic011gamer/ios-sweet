@@ -72,7 +72,11 @@ static int test_row_layouts(id ctx, struct Macro *m)
                     if (abs(q[0] - (c ? 191 : 64)) > 1 || abs(q[1] - 128) > 1 ||
                         abs(q[2] - (c ? 64 : 191)) > 1 || q[3] != 255) return 24;
                 }
-                for (size_t x = widths[c] * 4; x < stride; x++) if (p[y * stride + x] != 0x5a) return 25;
+                /* Row tails survive only the bridge's padded copy. A GPU-aligned
+                 * surface (kernel 0133) is rendered in place: GMEM resolves
+                 * whole tiles, so its tail bytes are scratch, as on Apple's GPUs. */
+                if (stride % 256)
+                    for (size_t x = widths[c] * 4; x < stride; x++) if (p[y * stride + x] != 0x5a) return 25;
             }
         }
         printf("PASS output %ux%u fmt %#x stride %zu, object fence and all rows\n",
