@@ -47,6 +47,10 @@ env:
 
 jobs:
   build:
+    # Draft build-cache assets are visible only to write-capable repository
+    # tokens. Needed by the optional compatible-IIG download above the build.
+    permissions:
+      contents: write
     # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
     # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
     runs-on: ${{ inputs.runner || 'macos-14' }}
@@ -120,6 +124,7 @@ jobs:
       - name: Package build tree for local compiles
         if: always()
         run: |
+          test -d dxb/build/xnu.obj || exit 0
           # Generated headers, config option headers, mig output and the patched
           # source: enough to re-run any single compile command from the log locally.
           SDK=$(xcrun --sdk macosx --show-sdk-path)
@@ -144,6 +149,7 @@ jobs:
         run: |
           mkdir -p out/kdk-libs
           for lib in /Library/Developer/KDKs/*/System/Library/KernelSupport/lib*.a; do
+            test -f "$lib" || continue
             b=$(basename "$lib" .a)
             ar t "$lib" > "out/kdk-libs/$b.members.txt" 2>&1 || true
             nm -m "$lib" > "out/kdk-libs/$b.nm.txt" 2>&1 || true
