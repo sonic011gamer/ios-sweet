@@ -6,6 +6,37 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **PRIORITY CHANGED BY USER: restore missing content first, FPS later.**
+  Last A8-corrected boot passed ALL real ES2/ES3 pixel tests including white
+  glyphs, ASTC, float layers. t290launch injected backboardd; GPU UI active.
+  User reports widespread disappearing content, not just individual icons.
+  Raw logs ios-t290/logs/a8-fps1: bridge flush rates vary 4.6-112.2/s and are
+  NOT panel FPS. GPU waits 1.8-4.7 ms; kernel convert ~4.2 ms. Long intervals
+  outside GL include idle/display-off, not proven pure CPU rendering cost.
+  Kernel also panicked: Non-monotonic time last_dispatch 0x164c9d216 ctime 0.
+  Investigate separately; do not hide the panic/assertion or claim FPS fixed.
+- **USB NATIVE FRAME CAPTURE NOW WORKS on current 0135.** Live COM7,
+  high speed, config 1, errors 0. Header-only 64-byte host reads timed out on
+  large frames; changed viewer.read_packet to large reads + buffered parsing
+  and increased SetupComm input queue. Raw complete 3072064-byte frame in
+  0.221s and probe complete 3072000-byte payload in 0.25s, 800x1280,
+  stride2400 shift229. Screenshot proves mostly black lock screen with
+  purple status/bottom label; no need ask user for another example screen.
+  Files ios-t290/usb-captures/elements-raw/frame-0.{raw,png}, elements2/*.png,
+  live-log*.txt. A later multi-frame attempt found device back in Android;
+  do not claim sustained viewer stability from these two complete frames.
+- **NEXT DIAGNOSTIC STAGED:** local bridge with bounded shader/program,
+  uniform-name and texture/draw state trace; marker file beginning '1'.
+  Trace disabled in eagltest, enabled only backboardd. Does NOT claim visual
+  fix. Existing corrected test/guard preserved. Local compile/sign/page hash
+  checks PASS. SD request 4 ops: backup bridge/log, install trace bridge +
+  /private/var/tmp/t290eagl.trace. Full 34126850-byte readback PASS; SHA256
+  9b3c5e8da47779cc4f9f1e3d6631a63911185253abe7a8a02aa7bac229c7e91f.
+  Bridge ca4c4b6ee2ced72a72717480d720154f9a9329afa2576ee84d998349e3477918.
+  Manifest dl/elements-trace1/sd-staged.json. Waiting manual iPadOS boot.
+  Next immediately drain USB L logs repeatedly while capturing F frames.
+  No kernel change or flash. '0' marker disables trace next boot/daemon start.
+
 - **NEW HARDWARE LOG cloud-bgra1:** SD cloud update done 4/4. BGRA raw
   and alpha blend now PASS (128,0,0,128 / 128,0,127,255), confirming mip fix.
   Next failure was A8 raw sample 0,0,0,128, GL error 0, eagltest exit 52;

@@ -1,11 +1,12 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 **Active SM-T290 work (2026-10-22):** see `t290/NOTES.md` and `t290/GPU.md`.
-Recovery 0135 installed. Cloud bridge BGRA mip fix now PASSES real GPU pixel
-checks. CPU fallback persists because A8 test had an incorrect expected RGB
-value (exit 52); expectation corrected and white glyph shader tests added.
-Only corrected test is staged on SD; cloud bridge is preserved. Next manual
-iPadOS boot and real pixel validation. No recovery reflash needed.
+Recovery 0135 installed. All real EAGL ES2/ES3 tests pass, GPU compositor
+active, but UI content still widely missing. User priority: content first,
+FPS later. USB full-frame capture works after host-reader fix; screenshot
+shows almost black lock screen. Bounded shader/texture trace bridge staged
+on SD, awaiting next manual iPadOS boot. Kernel monotonic-time panic also
+observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

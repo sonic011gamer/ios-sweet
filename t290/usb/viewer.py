@@ -36,18 +36,23 @@ class Packet:
 
 def read_packet(read, deadline=15):
     end = time.monotonic() + deadline
+    buffered = bytearray()
     def exact(n):
-        out = bytearray()
-        while len(out) < n:
+        while len(buffered) < n:
             if time.monotonic() > end:
                 raise TimeoutError('USB response incomplete')
-            chunk = read(min(65536, n - len(out)))
+            # Avoid header-only host reads: this usbser link returned
+            # incomplete frames with them. Large reads gave full frames;
+            # parse the header from our own buffered bytes.
+            chunk = read(MAX_BYTES + HEADER.size)
             if not chunk:
                 continue
-            if len(chunk) > n - len(out):
-                raise ValueError('transport returned more bytes than requested')
-            out.extend(chunk)
-        return bytes(out)
+            buffered.extend(chunk)
+            if len(buffered) > MAX_BYTES + HEADER.size:
+                raise ValueError('USB response exceeds the packet limit')
+        out = bytes(buffered[:n])
+        del buffered[:n]
+        return out
     raw = exact(HEADER.size)
     magic, version, kind, seq, width, height, stride, fmt, shift, n, ns, reserved = HEADER.unpack(raw)
     if magic != MAGIC or version != 1 or kind not in (1, 2, 3, 4) or reserved:
@@ -111,6 +116,7 @@ class WindowsSerial:
         a.PurgeComm.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         a.SetCommState.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
         a.SetCommTimeouts.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        a.SetupComm.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
         a.EscapeCommFunction.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         a.BuildCommDCBW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p]
         device_path = chr(92) * 2 + '.' + chr(92) + port
@@ -118,6 +124,9 @@ class WindowsSerial:
         if self.handle == ctypes.c_void_p(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
+            # A native frame is 3 MB. Keep it queued while Python parses
+            # the header; the small default usbser queue can lose packets.
+            self.check(a.SetupComm(self.handle, MAX_BYTES + HEADER.size + 65536, 4096))
             dcb = ctypes.create_string_buffer(28)
             struct.pack_into('<I', dcb, 0, 28)
             self.check(a.BuildCommDCBW('baud=115200 parity=n data=8 stop=1', dcb))
@@ -248,7 +257,7 @@ def main():
             canvas.photo = ImageTk.PhotoImage(display)
             canvas.delete('all')
             canvas.create_image(canvas.winfo_width()//2, canvas.winfo_height()//2, image=canvas.photo)
-            status.set(f'Кадр {packet.sequence} · {packet.width}×{packet.height} · {args.fps:g} запросов/с · без потерь')
+            status.set(f'Кадр {packet.sequence} · {packet.width}×{packet.height} · {args.fps:g} запросов/с · полный кадр')
         except queue.Empty:
             pass
         if not stop.is_set(): app.after(50, update)

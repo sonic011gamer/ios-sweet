@@ -38,6 +38,14 @@ The installed `t290launch --test` guard must still run `eagltest` on the real
 GPU before enabling the bridge in backboardd. A failure keeps the system
 renderer active and records the failing pixel test in pstore.
 
+For disappearing-content diagnosis, a file containing `1` at
+`/private/var/tmp/t290eagl.trace` enables bounded tracing in backboardd:
+shader sources (49 KiB budget), program/shader associations, uniform names,
+and sampled draw/texture state. It does not enable tracing in `eagltest`.
+Write `0` to the marker and restart the daemon/boot to disable it.
+Trace-enabled performance is not a benchmark. The USB viewer collects the
+kernel log while requesting full native-panel frames.
+
 Full XNU kernel builds are still performed in the macOS workflow. Local kernel
 single-file compilation uses the existing cached generated headers in WSL;
 the complete Darwin kernel build/link toolchain has not been ported here.

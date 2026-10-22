@@ -35,6 +35,7 @@ static GLboolean (*mesa_current)(void *, void *, GLenum, GLsizei, GLsizei);
 static void *(*mesa_image)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 static void (*mesa_image_destroy)(void *);
 static void *gli_funcs[1100];
+static BOOL trace_render;
 static pthread_key_t current_key;
 /* The pthread key owns the context and runs its exit destructor. The raw
  * TLS mirror avoids a pthread lookup at every context-first GLI call. */
@@ -66,6 +67,11 @@ static struct {
     void (*TexParameteri)(GLenum, GLenum, GLint), (*GenerateMipmap)(GLenum);
     void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
     void (*CompressedTexImage2D)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *);
+    void (*ShaderSource)(GLuint, GLsizei, const GLchar *const *, const GLint *);
+    void (*AttachShader)(GLuint, GLuint);
+    GLint (*GetUniformLocation)(GLuint, const GLchar *);
+    void (*GetTexParameteriv)(GLenum, GLenum, GLint *);
+    void (*GetTexLevelParameteriv)(GLenum, GLint, GLenum, GLint *);
 } gl;
 
 static void plog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -525,6 +531,75 @@ static void t290_before_draw(int kind)
     if (!img->gpuDirty) [ctx.sharegroup.dirty addObject:img];
     image_mark(img, (size_t)y0, (size_t)y1);
 }
+
+/* Bounded diagnostics for disappearing content. Enabled by a file marker;
+ * normal rendering does not query or log this state. */
+static void t290_trace_draw(T290Context *ctx)
+{
+    if (!trace_render || !gl.GetTexLevelParameteriv) return;
+    unsigned n = ctx->_drawCount;
+    if (n > 48 && (n > 1024 || (n & (n - 1)))) return;
+    GLenum pending = gl.GetError();
+    if (pending >= 0x500 && pending < 0x520) ctx->_errors |= 1u << (pending - 0x500);
+    GLint program = 0, active = 0, viewport[4] = {0}, mask[4] = {0};
+    gl.GetIntegerv(0x8b8d, &program);
+    gl.GetIntegerv(0x84e0, &active);
+    gl.GetIntegerv(0x0ba2, viewport);
+    gl.GetIntegerv(0x0c23, mask);
+    plog("TRACE draw %u ctx %p program %d fbo %u viewport %d,%d,%d,%d color-mask %d%d%d%d",
+        n, (__bridge void *)ctx, program, ctx->_drawFbo, viewport[0], viewport[1],
+        viewport[2], viewport[3], mask[0], mask[1], mask[2], mask[3]);
+    for (GLuint u = 0; u < ctx->_units; u++) {
+        if (!ctx->_boundName[u]) continue;
+        gl.ActiveTexture(0x84c0 + u);
+        GLint width = 0, height = 0, format = 0, min = 0, max = 0, swizzle[4] = {0};
+        gl.GetTexLevelParameteriv(0x0de1, 0, 0x1000, &width);
+        gl.GetTexLevelParameteriv(0x0de1, 0, 0x1001, &height);
+        gl.GetTexLevelParameteriv(0x0de1, 0, 0x1003, &format);
+        gl.GetTexParameteriv(0x0de1, 0x2801, &min);
+        gl.GetTexParameteriv(0x0de1, 0x813d, &max);
+        for (unsigned c = 0; c < 4; c++) gl.GetTexParameteriv(0x0de1, 0x8e42 + c, &swizzle[c]);
+        T290SurfaceImage *img = ctx.sharegroup.textures[@(ctx->_boundName[u])];
+        plog("TRACE unit %u tex %u surface %u %dx%d internal %#x min %#x max %d swizzle %x,%x,%x,%x",
+            u, ctx->_boundName[u], img ? IOSurfaceGetID(img->source) : 0, width, height,
+            format, min, max, swizzle[0], swizzle[1], swizzle[2], swizzle[3]);
+    }
+    gl.ActiveTexture((GLenum)active);
+    GLenum diagnostic_error = gl.GetError();
+    if (diagnostic_error) plog("TRACE query error %#x", diagnostic_error);
+}
+
+static void t290_shader_source(GLuint shader, GLsizei count, const GLchar *const *strings,
+    const GLint *lengths)
+{
+    gl.ShaderSource(shader, count, strings, lengths);
+    if (!trace_render) return;
+    static size_t total;
+    for (GLsizei i = 0; i < count && total < 49152; i++) {
+        size_t size = lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+        for (size_t offset = 0; offset < size && total < 49152; offset += 600) {
+            size_t part = MIN((size_t)600, size - offset);
+            plog("TRACE shader %u part %d offset %zu: %.*s", shader, i, offset,
+                (int)part, strings[i] + offset);
+            total += part;
+        }
+    }
+}
+
+static void t290_attach_shader(GLuint program, GLuint shader)
+{
+    gl.AttachShader(program, shader);
+    if (trace_render) plog("TRACE program %u shader %u", program, shader);
+}
+
+static GLint t290_uniform_location(GLuint program, const GLchar *name)
+{
+    GLint location = gl.GetUniformLocation(program, name);
+    static unsigned logged;
+    if (trace_render && logged++ < 128)
+        plog("TRACE uniform program %u %s location %d", program, name, location);
+    return location;
+}
 static void t290_texture_write(BOOL redefine)
 {
     T290Context *ctx = current_ctx();
@@ -573,7 +648,7 @@ static void bind_unit(T290Context *ctx, GLuint name, T290SurfaceImage *img)
     GLuint u = ctx->_unit;
     ctx->_boundName[u] = name;
     ctx->_bound[u] = img && img->backing ? img : nil;
-    if (ctx->_bound[u] && u >= ctx->_units) ctx->_units = u + 1;
+    if ((ctx->_bound[u] || (trace_render && name)) && u >= ctx->_units) ctx->_units = u + 1;
 }
 static void t290_bind_texture(GLenum target, GLuint name)
 {
@@ -939,6 +1014,14 @@ static void replace(Class c, const char *name, IMP fn, BOOL meta)
 
 __attribute__((constructor)) static void bridge_init(void)
 {
+    if (!strcmp(getprogname(), "backboardd")) {
+        int trace_fd = open("/private/var/tmp/t290eagl.trace", O_RDONLY);
+        if (trace_fd >= 0) {
+            char enabled = 0;
+            trace_render = read(trace_fd, &enabled, 1) == 1 && enabled == '1';
+            close(trace_fd);
+        }
+    }
     mach_port_t service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetGPU"));
     if (service) { IOServiceOpen(service, mach_task_self(), 0, &log_conn); IOObjectRelease(service); }
     log_fd = open("/private/var/tmp/t290eagl.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
@@ -965,11 +1048,13 @@ __attribute__((constructor)) static void bridge_init(void)
         !LOAD(DeleteRenderbuffers) || !LOAD(ActiveTexture) || !LOAD(Enable) || !LOAD(Disable) ||
         !LOAD(Scissor) || !LOAD(Viewport) || !LOAD(EGLImageTargetTexture2DOES) ||
         !LOAD(EGLImageTargetRenderbufferStorageOES) || !LOAD(TexParameteri) || !LOAD(GenerateMipmap) ||
-        !LOAD(TexImage2D) || !LOAD(CompressedTexImage2D)) {
+        !LOAD(TexImage2D) || !LOAD(CompressedTexImage2D) || !LOAD(ShaderSource) ||
+        !LOAD(GetTexParameteriv) || !LOAD(AttachShader) || !LOAD(GetUniformLocation)) {
         plog("t290eagl: incompatible Mesa: GL entry point missing");
         mesa_create = NULL;
         return;
     }
+    LOAD(GetTexLevelParameteriv);  /* optional, diagnostic ES3 query */
 #undef LOAD
     t290_dispatch_init();
     Class c = objc_getClass("EAGLContext");

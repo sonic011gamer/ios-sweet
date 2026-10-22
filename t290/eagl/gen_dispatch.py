@@ -75,6 +75,9 @@ special = {
     'tex_image2D': 't290_tex_image2d',
     'compressed_tex_image2D': 't290_compressed_tex_image2d',
     'generate_mipmap_EXT': 't290_generate_mipmap',
+    'shader_source_ARB': 't290_shader_source',
+    'attach_object_ARB': 't290_attach_shader',
+    'get_uniform_location_ARB': 't290_uniform_location',
 }
 # GL calls writing the draw framebuffer -> rows they can touch (eaglshim.m)
 draw_calls = {
@@ -118,6 +121,7 @@ for i, member in enumerate(members):
     out.append('  t290_make_current(ctx);')
     if name in draw_calls:
         out.append(f'  t290_before_draw({draw_calls[name]});')
+        out.append('  t290_trace_draw(current_ctx());')
     if name in texture_writes | texture_definitions:
         out.append(f'  t290_texture_write({"YES" if name in texture_definitions else "NO"});')
     call = special.get(name)
