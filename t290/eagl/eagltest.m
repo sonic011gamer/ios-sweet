@@ -145,7 +145,8 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsig
     CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2800, 0x2600);
     const char *sources[] = {
         "attribute vec2 position; varying vec2 uv; void main(){uv=position*0.5+0.5;gl_Position=vec4(position,0.0,1.0);}",
-        "precision mediump float; varying vec2 uv; uniform sampler2D image; void main(){gl_FragColor=texture2D(image,uv);}"
+        "precision mediump float; varying vec2 uv; uniform sampler2D image; uniform int glyph; "
+        "void main(){vec4 s=texture2D(image,uv);gl_FragColor=glyph!=0?vec4(s.a):s;}"
     };
     GLuint shaders[2], program = CALL(597, GLuint, (void *));
     for (unsigned j = 0; j < 2; j++) {
@@ -202,7 +203,7 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsig
     } cases[] = {
         {"RGBA icon", 0x1908, 0x1908, 0x1401, 4, {128, 0, 0, 128}, {128, 0, 0, 128}, NO},
         {"BGRA icon", 0x1908, 0x80e1, 0x1401, 4, {0, 0, 128, 128}, {128, 0, 0, 128}, NO},
-        {"A8 glyph", 0x1906, 0x1906, 0x1401, 1, {128}, {255, 255, 255, 128}, YES},
+        {"A8 mask", 0x1906, 0x1906, 0x1401, 1, {128}, {0, 0, 0, 128}, YES},
         {"L8 glyph", 0x1909, 0x1909, 0x1401, 1, {96}, {96, 96, 96, 255}, NO},
         {"RGBA16F layer", 0x881a, 0x1908, 0x140b, 8,
             {0x00, 0x38, 0x00, 0x34, 0x00, 0x3c, 0x00, 0x38}, {128, 64, 255, 128}, NO},
@@ -212,7 +213,10 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsig
     CALL(98, void, (void *, GLsizei, GLuint *), 1, &upload);
     CALL(5, void, (void *, GLenum, GLuint), 0x0de1, upload);
     CALL(195, void, (void *, GLenum, GLint), 0x0cf5, 1); /* unpack alignment */
+    GLint glyph = CALL(625, GLint, (void *, GLuint, const char *), program, "glyph");
+    if (glyph < 0) return 62;
     for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        CALL(606, void, (void *, GLint, GLint), glyph, 0);
         if (cases[c].type == 0x140b && api < 3) continue;
         /* Reuse the same texture after the RGBA partial chain. BGRA may
          * choose different Mesa storage despite the same unsized internal
@@ -260,6 +264,33 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsig
                 }
                 if (abs(pixel[k] - expected) > 2) return 50 + c;
             }
+        }
+        if (cases[c].format == 0x1906) {
+            /* GLES2 table 3.12: ALPHA samples (0,0,0,A). A glyph shader
+             * supplies the ink color. Check premultiplied white ink as well
+             * as the raw mask, rather than requiring white from GL_ALPHA. */
+            CALL(606, void, (void *, GLint, GLint), glyph, 1);
+            for (unsigned blend = 0; blend < 2; blend++) {
+                CALL(63, void, (void *, GLenum), 0x0be2);
+                CALL(12, void, (void *, GLfloat, GLfloat, GLfloat, GLfloat), 0, 0, 1, 1);
+                CALL(10, void, (void *, GLbitfield), 0x4000);
+                if (blend) {
+                    CALL(72, void, (void *, GLenum), 0x0be2);
+                    CALL(336, void, (void *, GLenum, GLenum, GLenum, GLenum), 1, 0x0303, 1, 0x0303);
+                }
+                CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
+                uint8_t pixel[4] = {0};
+                CALL(237, void, (void *, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *),
+                    32, 32, 1, 1, 0x1908, 0x1401, pixel);
+                GLenum err = CALL(102, GLenum, (void *));
+                printf("A8 white glyph blend %u sample %u,%u,%u,%u error %#x\n",
+                    blend, pixel[0], pixel[1], pixel[2], pixel[3], err);
+                if (err) return 63;
+                const uint8_t expected[4] = {128, 128, blend ? 255 : 128, blend ? 255 : 128};
+                if (!getenv("SWEET_FAKE")) for (unsigned k = 0; k < 4; k++)
+                    if (abs(pixel[k] - expected[k]) > 2) return 64;
+            }
+            CALL(606, void, (void *, GLint, GLint), glyph, 0);
         }
         if (!c) {
             uint8_t mip[4 * 4];

@@ -1,12 +1,11 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 **Active SM-T290 work (2026-10-22):** see `t290/NOTES.md` and `t290/GPU.md`.
-Recovery 0135 installed and partition readback verified. Real boot consumed
-new bridge/test SD request, but BGRA pixel regression failed (exit 51),
-so t290launch ran backboardd with the system renderer (CPU fallback).
-Fix 25b21dd tracks upload format/type in mip compatibility; CI 39796561147
-passed. Local WSL bridge build also works; update staged on SD.
-Real-device pixel validation still required. No recovery reflash needed.
+Recovery 0135 installed. Cloud bridge BGRA mip fix now PASSES real GPU pixel
+checks. CPU fallback persists because A8 test had an incorrect expected RGB
+value (exit 52); expectation corrected and white glyph shader tests added.
+Only corrected test is staged on SD; cloud bridge is preserved. Next manual
+iPadOS boot and real pixel validation. No recovery reflash needed.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

@@ -6,6 +6,24 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **NEW HARDWARE LOG cloud-bgra1:** SD cloud update done 4/4. BGRA raw
+  and alpha blend now PASS (128,0,0,128 / 128,0,127,255), confirming mip fix.
+  Next failure was A8 raw sample 0,0,0,128, GL error 0, eagltest exit 52;
+  launcher again correctly used CPU/system renderer. Raw log saved at
+  ios-t290/logs/cloud-bgra1/console-ramoops-0.bin and console.txt.
+- **A8 TEST EXPECTATION WAS WRONG, not an observed A8 driver fault.**
+  GLES2 spec table 3.12 says ALPHA returns (0,0,0,A). Old test expected
+  (1,1,1,A). Corrected expected raw mask and added separate white-ink shader
+  checks, with/without premultiplied alpha composition (no guard bypass).
+  Built/signed locally in 9s; ARM64/iOS16/page hashes/entitlements PASS.
+- Preserved requested CLOUD bridge. Staged ONLY updated eagltest plus GET
+  backups of old test/log to dl/a8-testfix1/before. Request 3 ops, full
+  33666256-byte SD readback PASS. Request SHA256
+  210a5e43a4a270cec99e7c34a26117f62a054b587cb9dab43f0683e7d074c5b2;
+  test a7a14c6bedd2b7b20aff600a4bdb05c41b1b7f1a94cfc7ce02fa9021a91a75c1.
+  NOT consumed yet; next manual iPadOS boot. Real pixel results for this
+  corrected test still pending. No kernel or bridge write this turn.
+
 - **USER CHOSE CLOUD BUILD FOR TABLET.** Replaced the unconsumed local
   request (state 0, 0/4) with cloud artifact from run 39796561147.
   SD request 4 ops: backup existing bridge/log to dl/cloud-eagl-bgra1/before,
