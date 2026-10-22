@@ -6,6 +6,19 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **READY FOR HARDWARE BOOT:** run 39794145243 completed all graphics steps
+  successfully, including native Intel Mesa and fake-GPU ES2/ES3 regressions.
+  These do not validate real GPU pixels. Downloaded t290eagl artifact into
+  dl/k-t290-0135/graphics-39794145243. Removed predecessor 39792400349 only
+  after new kernel upload succeeded; 39794145243 is the retained run.
+- Previous SD request confirmed done 2/2. Staged new request 4 ops: GET old
+  bridge/log into dl/k-t290-0135/before, PUT final bridge to
+  /usr/lib/t290eagl-mesa.dylib and eagltest to /usr/bin/eagltest mode 755.
+  Full 34233456-byte raw SD request readback PASS, SHA256
+  e2b95fa7da3739e7695ec6d28bc767a98e9695a0ab9fcea543aff0a09c516ff6.
+  Not consumed yet: manual iPadOS boot required. Recovery 0135 installed.
+  Next USB live capture; if returning to Android run t290-xfer.ps1 -Result.
+
 - **CI update:** 39792400349 kernel reuse/upload SUCCESS, iOS bridge build
   and upload SUCCESS. Host Mesa libraries built, but optional glprobe failed
   compiling ARM-only watchdog registers on Intel. ecb3b26 adds x86_64
