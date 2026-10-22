@@ -22,6 +22,13 @@
 - CI: eagl 39771029402 PASS, mesa-ios 39771029491 PASS, xnu 39771042195 PASS.
   Artifacts `dl/k-t290-0133/{eagl,mesa,xnu-kernel}`. Recovery = 0131 image
   (953ba242...) repacked with the 0133 kernel only (round trip verified).
+- User approved ("да"). **INSTALLED** recovery 0133 `dl/k-t290-0133/recovery-0133.img`
+  SHA256 51d3531b86f0412cb38820b5f13020b783a763a85128f15607708968aa1eb9ee, full
+  read-back verified; kernel e1b3d978... Rollback image = 0131 `dl/k-t290usb1/t290-ios.img`.
+- SD request STAGED (7 ops, read back cdbbd3e5...): get old log/Mesa/glapi to
+  `dl/k-t290-0133/before/`, put bridge (`t290eagl-mesa.dylib`), eagltest,
+  libOSMesa.8 and libglapi.0 from these builds. Next: boot iPadOS, pstore,
+  `t290-xfer.ps1 -Result`; check "core clock 400 MHz", eagltest PASS, fps line.
 
 ## Active handoff 2026-10-22 (evening): bridge7 — GPU UI artifacts and speed
 
