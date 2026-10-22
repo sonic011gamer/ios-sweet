@@ -6,6 +6,17 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **RECOVERY 0135 INSTALLED (user explicitly approved this write).**
+  Guarded write checked model SM-T290, 64 MiB partition size, current 0133
+  hash, staged image hash and saved backup hash before dd + sync.
+  Full partition SHA256 readback PASS:
+  `d2ef0bbfea670ea53505e27993e63874d940df2fd9240f82e71e96b003e1a8a5`.
+  Local result ios-t290/backup-20261022-gpu0135/flash-0135-result.json.
+  Android remains running; no reboot issued. 0135 not hardware-boot-tested.
+  Final graphics library still pending: run 39792400349 both jobs queued.
+  Do not claim new bridge/mip fix installed. Next: complete graphics CI,
+  stage bridge/test via SD transfer, then manual recovery boot and USB capture.
+
 - **Latest verified state:** kernel job 39788991320 SUCCESS; downloaded kernel
   SHA256 `8dcd7c61581fbd18a4a3d5bd11cbe3d7f2ef25497815f8cb3d8cc79c4e5037f5`
   matches artifact SHA256SUMS. Repacked recovery-0135.img in dl/k-t290-0135,
