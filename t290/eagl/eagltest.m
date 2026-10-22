@@ -97,6 +97,25 @@ static int test_row_layouts(id ctx, struct Macro *m)
             }
         }
         printf("PASS shared IOSurface storage across two texture names\n");
+        /* Scissored redraw (CA's damage rectangle): rows 10-19 change, the
+         * rest must keep the earlier green after the object fence. */
+        CALL(72, void, (void *, GLenum), 0x0c11);
+        CALL(251, void, (void *, GLint, GLint, GLsizei, GLsizei), 0, 10, (GLsizei)widths[c], 10);
+        CALL(12, void, (void *, GLfloat, GLfloat, GLfloat, GLfloat), 1, 0, 0, 1);
+        CALL(10, void, (void *, GLbitfield), 0x4000);
+        CALL(63, void, (void *, GLenum), 0x0c11);
+        CALL(470, void, (void *, GLenum, GLuint), 0x1702, tex);
+        if (CALL(102, GLenum, (void *))) return 29;
+        if (!getenv("SWEET_FAKE")) {
+            const uint8_t *p = IOSurfaceGetBaseAddress(s);
+            for (size_t y = 0; y < heights[c]; y++) {
+                BOOL red = y >= 10 && y < 20;
+                const uint8_t *q = p + y * stride + (widths[c] / 2) * 4;
+                unsigned r = c ? q[2] : q[0], g = q[1], b = c ? q[0] : q[2];
+                if (r != (red ? 255 : 0) || g != (red ? 0 : 255) || b || q[3] != 255) return 19;
+            }
+        }
+        printf("PASS scissored redraw copies its rows only\n");
         CALL(59, void, (void *, GLsizei, const GLuint *), 1, &alias);
         CALL(673, void, (void *, GLsizei, const GLuint *), 1, &fbo);
         CALL(59, void, (void *, GLsizei, const GLuint *), 1, &tex);
@@ -151,7 +170,9 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
             p[y * stride + x * 2 + 1] = alpha;
         }
         if (IOSurfaceUnlock(s, 0, NULL)) return 37;
-        CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
+        /* Round 1 keeps the texture bound, as CA does: the new CPU pixels
+         * must still reach the padded GPU copy before the draw. */
+        if (!round) CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
         CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
         CALL(90, void, (void *));
         uint8_t pixel[4] = {0};

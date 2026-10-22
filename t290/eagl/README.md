@@ -54,21 +54,20 @@ restore backboardd's ProgramArguments to `/usr/libexec/backboardd` using the
 SD file-transfer tool. Preserve the previous launchd cache and Mesa library
 before replacing them. No kernel/recovery reflash is needed with kernel 0129.
 
-Nonaligned rows use a padded GPU IOSurface. Texture/renderbuffer aliases
-share one Mesa EGL image per IOSurface/layout, so they see each other's GPU
-writes. CPU row copies preserve the original stride; texture binds refresh
-CPU images when IOSurfaceLock/Unlock advances their seed. Framebuffer writes
-mark the backing dirty. Finish/object fences publish dirty outputs after a
-GPU wait; ordinary flushes are asynchronous except for dirty display
-surface1, which the CPU framebuffer driver consumes immediately.
-This compatibility path still needs hardware performance validation.
-Aligned surfaces continue to import directly. PixelFormat0 scratch surfaces
-use the format supplied by the EAGL call.
+Rows not aligned to Freedreno's 64-pixel import pitch (256 bytes for BGRA,
+128 for LA08, 64 for A8/L8) use a padded GPU IOSurface. Texture/renderbuffer
+aliases share one Mesa EGL image per IOSurface/layout. CA treats IOSurface
+textures as zero-copy, so before every draw the bridge checks the IOSurface
+seed of each padded texture bound on any unit and re-uploads changed ones
+(a bind-time check missed updates from other processes: stale or missing
+images). GPU writes are tracked as a row range from viewport and scissor;
+finish/object fences copy only those rows back, ordinary flushes copy
+only for display surface 1, which the CPU framebuffer driver consumes.
+Aligned surfaces import directly (zero-copy).
 
-The pixel test checks aliases by rendering through a second texture name
-and checking the same IOSurface through the first object's fence. Throttled
-GL error diagnostics preserve error flags for GLI get_error callers. Logs
-also include time spent waiting, flush counts and draw counts.
+Mesa entry points used by the bridge itself are resolved once at load time
+(OSMesaGetProcAddress is a linear search over the glapi table). Every 300
+presented frames the log has fps, GPU wait and copy volume per frame.
 
 The bridge handles the IOSurface path observed in this firmware. Drawable
 renderbuffer allocation is not implemented; unsupported surface formats

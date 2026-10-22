@@ -43,15 +43,24 @@ special = {
     'framebuffer_texture2D_EXT': 't290_framebuffer_texture',
     'framebuffer_renderbuffer_EXT': 't290_framebuffer_renderbuffer',
     'delete_framebuffers_EXT': 't290_delete_framebuffers',
+    'active_texture': 't290_active_texture',
+    'enable': 't290_enable',
+    'disable': 't290_disable',
+    'scissor': 't290_scissor',
+    'viewport': 't290_viewport',
 }
+# GL calls writing the draw framebuffer -> rows they can touch (eaglshim.m)
 draw_calls = {
-    'clear', 'draw_arrays', 'draw_elements', 'draw_range_elements',
-    'draw_arrays_instanced', 'draw_elements_instanced', 'blit_framebuffer_EXT',
-    'clear_bufferiv', 'clear_bufferuiv', 'clear_bufferfv', 'clear_bufferfi',
+    'draw_arrays': 'DRAW_PRIMITIVES', 'draw_elements': 'DRAW_PRIMITIVES',
+    'draw_range_elements': 'DRAW_PRIMITIVES', 'draw_arrays_instanced': 'DRAW_PRIMITIVES',
+    'draw_elements_instanced': 'DRAW_PRIMITIVES', 'clear': 'DRAW_CLEAR',
+    'clear_bufferiv': 'DRAW_CLEAR', 'clear_bufferuiv': 'DRAW_CLEAR',
+    'clear_bufferfv': 'DRAW_CLEAR', 'clear_bufferfi': 'DRAW_CLEAR',
+    'blit_framebuffer_EXT': 'DRAW_ALL_ROWS',
 }
 texture_writes = {'copy_tex_sub_image2D', 'tex_sub_image2D'}
 texture_definitions = {'tex_image2D', 'copy_tex_image2D'}
-check_calls = draw_calls | texture_writes | texture_definitions | {
+check_calls = set(draw_calls) | texture_writes | texture_definitions | {
     'pixel_storei', 'use_program_object_ARB', 'compile_shader_ARB', 'link_program_ARB',
     'framebuffer_texture2D_EXT', 'framebuffer_renderbuffer_EXT', 'bind_framebuffer_EXT',
     'tex_parameteri', 'enable', 'disable', 'blend_func', 'blend_func_separate',
@@ -74,7 +83,7 @@ for i, member in enumerate(x.strip() for x in body.split(';') if x.strip()):
     out.append(f'static {ret} gli_{i}(GLIContext ctx' + (', ' + args if params else '') + ') {')
     out.append('  t290_make_current(ctx);')
     if name in draw_calls:
-        out.append('  t290_before_draw();')
+        out.append(f'  t290_before_draw({draw_calls[name]});')
     if name in texture_writes | texture_definitions:
         out.append(f'  t290_texture_write({"YES" if name in texture_definitions else "NO"});')
     call = special.get(name)
