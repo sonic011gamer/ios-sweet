@@ -6,6 +6,32 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **Latest user instruction: delete previous Actions runs, keep only one
+  kernel build. DONE:** 94 runs inventoried in this fork, 93 deleted through
+  the API; a fresh paginated listing contains only XNU **39781091148** for
+  t290 (30c8e21). It was rerun, is still queued at last check, and must be
+  preserved. EAGL 39781544025 was cancelled and deleted with the old runs.
+  Do not launch extra separate EAGL/Mesa runs without accounting for this
+  request to keep a single kernel-building run.
+- The earlier final builds failed because GitHub did not acquire a hosted
+  runner after multiple attempts, not compiler errors. Annotations explicitly
+  report ARM macOS capacity constraints. Both had zero executed build steps.
+  Rerun of the one preserved XNU run is pending. An Intel alternative was
+  investigated, not implemented: XNU needs its compatible Xcode 15 IIG ABI;
+  macOS fake-GPU Mesa artifact is arm64 and cannot be loaded by an Intel test.
+- Necessary artifacts saved BEFORE deletion under `dl/actions-cleanup/`:
+  `eagl-39780670625/` (passed prior bridge + test),
+  `buildtree-39774877169/buildtree.tgz` (archive validated),
+  `mesa-mac-39771029491/` (Mesa/glapi + build logs).
+  `backup-sha256.json` records file hashes, and before/after run inventories
+  plus the deletion log are retained locally. Old run links below now refer
+  to intentionally deleted history. Recovery images/Android backups remain
+  local. Installed recovery is still 0133; no new partition write occurred.
+- Follow-up CI dependency: EAGL's mac-smoke currently looks up the latest
+  successful mesa-ios Actions run. That history was removed as requested;
+  a future combined build must build/reuse Mesa explicitly instead of this
+  now-empty historical lookup. No workflow migration has been committed yet.
+
 - User still reports missing icons/labels/keyboard, purple text or regions,
   broken rendering in some apps; wants both higher FPS and graphical fixes.
 - Fresh Android pstore saved to `ios-t290/logs/fps-bugs1/`: same boot as
