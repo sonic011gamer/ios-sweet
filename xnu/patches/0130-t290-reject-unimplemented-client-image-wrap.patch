@@ -1,0 +1,18 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -776,6 +776,14 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		sweet_surf_log_once("sel", selector);
+ 		return kIOReturnSuccess;
+ 	}
++	case 6: /* IOSurfaceClientWrapClientImage */
++		/* No mapping of client image memory is implemented. A successful
++		 * zeroed lock result creates an invalid IOSurfaceClient, which CA
++		 * later dereferences in IOSurfaceClientGetBulkAttachments. Refuse
++		 * the optional optimization so GLES uses normal texture uploads.
++		 */
++		sweet_surf_log_once("sel", selector);
++		return kIOReturnUnsupported;
+ 	default:
+ 		/* Values, notifications, ownership, timestamps...: accept and ignore. */
+ 		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
