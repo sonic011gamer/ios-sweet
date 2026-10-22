@@ -4,6 +4,25 @@
 (XNU + неизменённый userland iOS 16 на Redmi Note 10 Pro). Локальная копия:
 `D:\test1\ios-sweet`, его `NOTES.md` — подробный журнал того, как это делалось.
 
+## Active handoff 2026-10-22 (night): kernel 0133 + bridge8/Mesa (GPU only)
+
+- Bridge7 boot (logs `ios-t290/logs/b7`): eagltest PASS on hardware incl. new
+  checks; UI 4.9 fps, full-screen copy 3.9 MB/frame, GPU wait 5.8 ms/frame.
+  User: icons missing, lock screen purple, very low fps. User wants GPU only.
+- Commit 7cc0625: YCbCr 420f plane imports (Mesa R8/RG8 formats in patch
+  0003), mipmap clamp (single-level textures with trilinear filters sampled
+  black), frame timing split (GL calls / GPU wait / copies / outside GL).
+- Commit 875614a, kernel patch 0133: IOSurface rows rounded to 256 bytes
+  (no padded copies), display shadow rows 3328 (GPU renders into scanout
+  surface 1), panel conversion reads the shadow via the cached alias after a
+  flush (was uncached WC reads), SweetGPU selector 8 Prepare = per-submit
+  cache upkeep (Mesa sends BO handles), VDD_CX (pm8953 S2 "smpa" 2) voted
+  NOM via RPM "vlvl" 256 then gfx3d GPLL0/2 = 400 MHz at the first GPU client
+  (boot-arg t290gpu_mhz=200 disables). Not verified on hardware.
+- CI: eagl 39771029402 PASS, mesa-ios 39771029491 PASS, xnu 39771042195 PASS.
+  Artifacts `dl/k-t290-0133/{eagl,mesa,xnu-kernel}`. Recovery = 0131 image
+  (953ba242...) repacked with the 0133 kernel only (round trip verified).
+
 ## Active handoff 2026-10-22 (evening): bridge7 — GPU UI artifacts and speed
 
 - User report on bridge6 + kernel 0131 (boot pulled to `ios-t290/logs/now/`):
