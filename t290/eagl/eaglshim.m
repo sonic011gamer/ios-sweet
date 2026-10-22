@@ -36,6 +36,9 @@ static void *(*mesa_image)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uin
 static void (*mesa_image_destroy)(void *);
 static void *gli_funcs[1100];
 static pthread_key_t current_key;
+/* The pthread key owns the context and runs its exit destructor. The raw
+ * TLS mirror avoids a pthread lookup at every context-first GLI call. */
+static __thread void *thread_current;
 
 /* Mesa entry points the bridge calls itself, resolved once at load time:
  * OSMesaGetProcAddress is a linear strcmp search over the whole glapi
@@ -246,27 +249,29 @@ enum { DRAW_PRIMITIVES, DRAW_CLEAR, DRAW_ALL_ROWS };
 static void t290_make_current(void *ptr)
 {
     T290Context *ctx = (__bridge T290Context *)ptr;
-    if (pthread_getspecific(current_key) == ptr)
+    if (thread_current == ptr)
         return;
     if (!mesa_current(ctx ? ctx->_mesa : NULL, ctx ? &ctx->_dummy : NULL, 0x1401, 1, 1)) {
         plog("t290eagl: MesaMakeCurrent failed %p", ptr);
         return;
     }
-    void *old = pthread_getspecific(current_key);
+    void *old = thread_current;
     if (ptr) CFRetain((__bridge CFTypeRef)ctx);
     pthread_setspecific(current_key, ptr);
+    thread_current = ptr;
     if (old) CFRelease(old);
 }
 
 static void release_current(void *ptr)
 {
     mesa_current(NULL, NULL, 0x1401, 0, 0);
+    thread_current = NULL;
     CFRelease(ptr);
 }
 
 static inline T290Context *current_ctx(void)
 {
-    return (__bridge T290Context *)pthread_getspecific(current_key);
+    return (__bridge T290Context *)thread_current;
 }
 
 static void t290_missing(unsigned slot, const char *name)
@@ -385,13 +390,18 @@ static void t290_flush(void)
 {
     T290Context *ctx = current_ctx();
     ++ctx->_flushCount;
-    gl.Flush();
     /* CA flushes, then swaps a full-screen surface (1 or its second
      * buffer) and the framebuffer driver converts it on the CPU at once:
      * the frame must be complete. Intermediate GPU textures need no wait. */
-    if (!ctx->_presentDirty) return;
+    if (!ctx->_presentDirty) {
+        gl.Flush();
+        return;
+    }
     ctx->_presentDirty = NO;
+    /* Finish already submits the pending commands. A preceding Flush
+     * forced a second trip through Mesa's submit path for every frame. */
     if (ctx->_gpuWork) t290_wait();
+    else gl.Flush();
     T290SurfaceImage *display = ctx.sharegroup.display;
     if (display && display->gpuDirty) {
         [display publish];
@@ -890,9 +900,9 @@ static BOOL set_current(id cls, SEL cmd, id ctx)
 {
     if (ctx && ![ctx isKindOfClass:[T290Context class]]) return NO;
     t290_make_current((__bridge void *)ctx);
-    return pthread_getspecific(current_key) == (__bridge void *)ctx;
+    return thread_current == (__bridge void *)ctx;
 }
-static id get_current(id cls, SEL cmd) { return (__bridge id)pthread_getspecific(current_key); }
+static id get_current(id cls, SEL cmd) { return (__bridge id)thread_current; }
 static void replace(Class c, const char *name, IMP fn, BOOL meta)
 {
     Method m = class_getInstanceMethod(meta ? object_getClass(c) : c, sel_registerName(name));

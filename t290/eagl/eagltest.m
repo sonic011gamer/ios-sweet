@@ -128,7 +128,7 @@ static int test_row_layouts(id ctx, struct Macro *m)
     return 0;
 }
 
-static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
+static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsigned api)
 {
     IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)@{
         (__bridge id)kIOSurfaceWidth: @228, (__bridge id)kIOSurfaceHeight: @162,
@@ -189,6 +189,79 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
         if (!getenv("SWEET_FAKE") && (abs(pixel[0] - lum) > 1 || abs(pixel[1] - lum) > 1 ||
             abs(pixel[2] - lum) > 1 || abs(pixel[3] - alpha) > 1)) return 35;
     }
+    /* Formats actually seen in backboardd: alpha glyphs, BGRA images,
+     * half-float intermediate layers and ASTC icons. Exercise both direct
+     * sampling and alpha composition; a successful import alone is not
+     * evidence that text, colors and transparency are correct. */
+    const struct {
+        const char *name;
+        GLenum internal, format, type;
+        unsigned cpp;
+        uint8_t value[8], expected[4];
+        BOOL straightAlpha;
+    } cases[] = {
+        {"RGBA icon", 0x1908, 0x1908, 0x1401, 4, {128, 0, 0, 128}, {128, 0, 0, 128}, NO},
+        {"BGRA icon", 0x1908, 0x80e1, 0x1401, 4, {0, 0, 128, 128}, {128, 0, 0, 128}, NO},
+        {"A8 glyph", 0x1906, 0x1906, 0x1401, 1, {128}, {255, 255, 255, 128}, YES},
+        {"L8 glyph", 0x1909, 0x1909, 0x1401, 1, {96}, {96, 96, 96, 255}, NO},
+        {"RGBA16F layer", 0x881a, 0x1908, 0x140b, 8,
+            {0x00, 0x38, 0x00, 0x34, 0x00, 0x3c, 0x00, 0x38}, {128, 64, 255, 128}, NO},
+        {"ASTC icon", 0x93b0, 0, 0, 0, {0}, {128, 0, 0, 128}, NO},
+    };
+    GLuint upload = 0;
+    CALL(98, void, (void *, GLsizei, GLuint *), 1, &upload);
+    CALL(5, void, (void *, GLenum, GLuint), 0x0de1, upload);
+    CALL(195, void, (void *, GLenum, GLint), 0x0cf5, 1); /* unpack alignment */
+    for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        if (cases[c].type == 0x140b && api < 3) continue;
+        if (cases[c].cpp) {
+            uint8_t data[16 * 8];
+            for (unsigned p = 0; p < 16; p++) memcpy(data + p * cases[c].cpp, cases[c].value, cases[c].cpp);
+            CALL(301, void, (void *, GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *),
+                0x0de1, 0, cases[c].internal, 4, 4, 0, cases[c].format, cases[c].type, data);
+        } else {
+            /* ASTC LDR void-extent block, constant RGBA16 UNORM. */
+            const uint8_t block[16] = {0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0x80, 0x80, 0, 0, 0, 0, 0x80, 0x80};
+            CALL(380, void, (void *, GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *),
+                0x0de1, 0, cases[c].internal, 4, 4, 0, sizeof(block), block);
+        }
+        /* Default mipmapped filter on a one-level icon must remain usable. */
+        CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2801, 0x2703);
+        CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2800, 0x2600);
+        for (unsigned blend = 0; blend < 2; blend++) {
+            CALL(63, void, (void *, GLenum), 0x0be2);
+            CALL(12, void, (void *, GLfloat, GLfloat, GLfloat, GLfloat), 0, 0, 1, 1);
+            CALL(10, void, (void *, GLbitfield), 0x4000);
+            if (blend) {
+                CALL(72, void, (void *, GLenum), 0x0be2);
+                CALL(336, void, (void *, GLenum, GLenum, GLenum, GLenum),
+                    cases[c].straightAlpha ? 0x0302 : 1, 0x0303, 1, 0x0303);
+            }
+            CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
+            uint8_t pixel[4] = {0};
+            CALL(237, void, (void *, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *),
+                32, 32, 1, 1, 0x1908, 0x1401, pixel);
+            GLenum err = CALL(102, GLenum, (void *));
+            printf("format %s blend %u sample %u,%u,%u,%u error %#x\n",
+                cases[c].name, blend, pixel[0], pixel[1], pixel[2], pixel[3], err);
+            if (err) return 40 + c;
+            if (!getenv("SWEET_FAKE")) for (unsigned k = 0; k < 4; k++) {
+                int expected = cases[c].expected[k];
+                if (blend) {
+                    if (k == 3) expected = 255;
+                    else {
+                        if (cases[c].straightAlpha) expected = (expected * cases[c].expected[3] + 127) / 255;
+                        if (k == 2) expected = MIN(255, expected + 255 - cases[c].expected[3]);
+                    }
+                }
+                if (abs(pixel[k] - expected) > 2) return 50 + c;
+            }
+        }
+    }
+    CALL(63, void, (void *, GLenum), 0x0be2);
+    CALL(195, void, (void *, GLenum, GLint), 0x0cf5, 4);
+    CALL(59, void, (void *, GLsizei, const GLuint *), 1, &upload);
     CALL(600, void, (void *, GLuint), 0);
     CALL(591, void, (void *, GLuint), program);
     for (unsigned j = 0; j < 2; j++) CALL(591, void, (void *, GLuint), shaders[j]);
@@ -296,7 +369,7 @@ static int test_main(void)
             if (!getenv("SWEET_FAKE") && (pixel[0] || pixel[1] || pixel[2] != 255 || pixel[3] != 255)) return 11;
             int layouts = test_row_layouts(ctx, m);
             if (layouts) return layouts;
-            int la = test_luminance_alpha(ctx, m, fbo);
+            int la = test_luminance_alpha(ctx, m, fbo, api);
             if (la) return la;
             CALL(643, void, (void *, GLsizei, const GLuint *), 1, &vbo);
             CALL(600, void, (void *, GLuint), 0);

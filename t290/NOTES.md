@@ -4,7 +4,40 @@
 (XNU + неизменённый userland iOS 16 на Redmi Note 10 Pro). Локальная копия:
 `D:\test1\ios-sweet`, его `NOTES.md` — подробный журнал того, как это делалось.
 
-## Active handoff 2026-10-22 (night): kernel 0133 + bridge8/Mesa (GPU only)
+## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
+
+- User still reports missing icons/labels/keyboard, purple text or regions,
+  broken rendering in some apps; wants both higher FPS and graphical fixes.
+- Fresh Android pstore saved to `ios-t290/logs/fps-bugs1/`: same boot as
+  `logs/b9/`. ES2/ES3 GPU pixel guard PASS, GPU clock 400 MHz. Bridge counters
+  report 29.0/35.5/24.6/46.0 rendered-frame flushes per second over 300-frame
+  windows; waits 3.1-5.3 ms/frame, no padded copies. These counters are not
+  proof of panel FPS or correct UI. No GL errors/GPU faults seen in this log.
+- Recovery read-back is still **0133**, SHA256
+  `51d3531b86f0412cb38820b5f13020b783a763a85128f15607708968aa1eb9ee`.
+  Prepared 0134 has NOT been installed. Previous SD request is done 2/2:
+  old bridge log retrieved to `dl/k-t290-0134/before/eagl9.log`, updated
+  647024-byte bridge installed. CI 39774871567 (EAGL) and 39774877169 (XNU)
+  both passed for 7095860.
+- New patch 0135 handles surface 1 through the same synchronous cached
+  native presentation path as CA's other buffer. Previously surface 1 went
+  through a deferred timer while CA could reuse it: a concrete race in the
+  code, but whether it explains the reported artifacts needs a device test.
+  Direct presentation clears a pending redraw and mutes the console too.
+  Actual SwapEnd/convert timing now logs every 300 swaps for both buffers.
+- Local XNU compile of the changed framebuffer source PASS (0/1 failures),
+  buildtree `/home/kirill/fps0135`, based on cached source plus 0133/0134.
+  Generator `t290/display/mkpatch.py` takes the post-0134 framebuffer source.
+- EAGL changes: raw TLS context mirror (pthread key retains ownership and
+  exit cleanup), no redundant Flush before Finish on a full-screen frame.
+  New guard tests sample/blend real CA formats: RGBA/BGRA icons, A8/L8
+  glyphs, RGBA16F intermediates, ASTC icons, all with a mipmapped filter.
+  CI/device results for these new changes are pending; no FPS gain claimed.
+- Next: commit/build 0135 and the bridge/tests through CI, prepare a checked
+  recovery image and SD request. A new recovery write requires user approval
+  under AGENTS.md; no new approval has been requested or received yet.
+
+## Previous handoff: kernel 0133 + bridge8/Mesa (GPU only)
 
 - Bridge7 boot (logs `ios-t290/logs/b7`): eagltest PASS on hardware incl. new
   checks; UI 4.9 fps, full-screen copy 3.9 MB/frame, GPU wait 5.8 ms/frame.

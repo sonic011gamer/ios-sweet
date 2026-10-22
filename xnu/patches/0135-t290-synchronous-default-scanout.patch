@@ -1,0 +1,63 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -369,6 +369,7 @@
+ 	if (fT290 && fNative && !fPowerOff && t290Direct(rec)) {
+ 		IOLockLock(fLock);
+ 		memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);  /* for a redraw after display on */
++		fDirty = false;                 /* do not replay an older deferred frame */
+ 		IOLockUnlock(fLock);
+ 		++sweet_fb_swap_count;
+ 		return;
+@@ -596,19 +597,32 @@
+ 	if (sf == NULL) {
+ 		return false;
+ 	}
+-	bool ok = sf != fSurface && sf->memory != NULL && sf->elementWidth == 1 &&
++	bool ok = sf->memory != NULL && sf->pixelFormat == SWEET_FB_FORMAT_BGRA && sf->elementWidth == 1 &&
+ 	    sf->elementHeight == 1 && (sf->bytesPerElement == 0 || sf->bytesPerElement == 4) &&
+ 	    sf->width >= fPanelW && sf->height >= fPanelH &&
+ 	    (uint64_t)sf->offset + (uint64_t)(fPanelH - 1) * sf->bytesPerRow + fPanelW * 4 <=
+ 	    sf->memory->getLength();
+ 	if (ok) {
++		if (!fConsolePaused) {
++			int quiet = 0;
++			fConsolePaused = true;
++			if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
++				sweet_console_muted = 1;
++			}
++		}
+ 		uint64_t t0 = mach_absolute_time();
+ 		/*
+ 		 * CA's second full-screen buffer: read it through the cached kernel
+ 		 * alias of its buffer after dropping stale lines (GPU writes bypass
+ 		 * the cache), not through the uncached IOSurface mapping.
+ 		 */
+-		IOBufferMemoryDescriptor *bmd = OSDynamicCast(IOBufferMemoryDescriptor, sf->memory);
++		/* Both CA buffers must be read before SwapEnd returns. Deferring the
++		 * default surface to the vsync timer let CA start the next GPU frame
++		 * while that timer was still reading it (tearing and missing regions).
++		 * The default surface wraps physical memory; its cached owner is
++		 * fShadow, whereas CA's other buffer owns its descriptor directly. */
++		IOBufferMemoryDescriptor *bmd = sf == fSurface ? fShadow :
++		    OSDynamicCast(IOBufferMemoryDescriptor, sf->memory);
+ 		uintptr_t pix = bmd != NULL ? (uintptr_t)bmd->getBytesNoCopy() : 0;
+ 		if (pix != 0) {
+ 			pix += sf->offset;
+@@ -621,13 +635,13 @@
+ 		fStatConv += t1 - t0;
+ 		if (fStatFrames++ == 0) {
+ 			fStatT0 = t0;
+-		} else if (fStatFrames == 600) {
++		} else if (fStatFrames == 300) {
+ 			uint64_t all, conv;
+ 			absolutetime_to_nanoseconds(t1 - fStatT0, &all);
+ 			absolutetime_to_nanoseconds(fStatConv, &conv);
+-			IOLog("SWEET FB: %llu.%llu fps (600 frames), convert %llu us per frame\n",
+-			    599ULL * 1000000000ULL / all, (5990ULL * 1000000000ULL / all) % 10,
+-			    conv / 600 / 1000);
++			IOLog("SWEET FB: %llu.%llu fps (300 swaps), convert %llu us per frame\n",
++			    299ULL * 1000000000ULL / all, (2990ULL * 1000000000ULL / all) % 10,
++			    conv / 300 / 1000);
+ 			fStatFrames = 0;
+ 			fStatConv = 0;
+ 		}

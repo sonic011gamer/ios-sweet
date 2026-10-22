@@ -1,10 +1,10 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 **Active SM-T290 work (2026-10-22):** see `t290/NOTES.md` and `t290/GPU.md`.
-Mesa ES2/ES3 GPU pixel tests pass. Kernel 0130 lets the compositor display
-an image, but the UI is incomplete and slow. Bridge5's row-layout pixel
-tests pass on hardware; bridge6 with shared surface storage and fewer
-GPU waits is staged for the next manual boot. See active t290 handoff.
+Mesa ES2/ES3 GPU pixel tests pass. Kernel 0133 is installed, GPU 400 MHz,
+no padded EAGL copies; latest bridge reports 24.6-46 rendered-frame flushes/s.
+Icons/text/keyboard and some apps still render incorrectly. Kernel 0135 and
+additional texture/blending tests are being prepared; see active t290 handoff.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
