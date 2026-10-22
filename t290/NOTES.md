@@ -28,12 +28,32 @@
   libglapi, `/usr/lib/t290eagl-mesa.dylib`, `/usr/bin/eagltest`, and a launchd
   cache that runs the test once. Backboardd runs without the old verbose
   probe for this test. Existing `/usr/lib/t290eagl.dylib` stays untouched.
-- User asked to boot iPadOS for ~3 minutes, then return to Android. Last
-  observation: adb device absent (possible iPadOS test in progress). Read
-  pstore and run `t290/tools/t290-xfer.ps1 -Result` when Android returns.
+- **First device test completed**, logs `ios-t290/logs/eagl-bridge1-{head,console}.bin`.
+  SD transfer: state 1, 7/7 successful; original Mesa and launchd saved to
+  `dl/eagl-bridge1/*.before.*`. EAGL ES2 and ES3 both created on the device;
+  each imported a 64x64 BGRA IOSurface, submitted GPU work, and reached
+  `GPU finish`. ES2 necessarily passed its pixel check (otherwise ES3 would
+  not start), but the final printf/PASS was not captured. Do not claim the
+  entire test passed based on this log alone.
+- That boot later panicked: `Non-monotonic time: last_dispatch ... ctime 0`
+  at sched_prim.c:796, CPU 2. No GPU timeout/fault or eagltest crash observed.
+  GUI was still the system software renderer in this boot.
+- Commit dd2d40e adds kernel logging of every pixel result and final exit
+  code, plus `t290launch --test TEST LIB PROGRAM`: run TEST with LIB; only
+  inject PROGRAM if TEST exits 0, otherwise use the system renderer.
+  **EAGL CI 39735995758 and ios-tools CI 39735995793 passed.** Artifacts:
+  `dl/eagl-bridge3` and `dl/ios-tools-eagl3`.
+- **Current pending SD request: 5 ops**, get old `/usr/bin/t290launch` to
+  `dl/eagl-bridge3/t290launch.before`, then put updated bridge, shader/pixel
+  test, launcher, and `launchd.guarded.plist`. Backboardd arguments are now
+  `/usr/bin/t290launch --test /usr/bin/eagltest /usr/lib/t290eagl-mesa.dylib
+  /usr/libexec/backboardd`. No separate test launchd job. On the next boot,
+  shader/pixel test gates the first attempt to render the GUI with Mesa.
+- User is back in rooted Android; request written and signature read back.
+  Next: boot iPadOS, return to Android, read pstore and `t290-xfer.ps1 -Result`.
 - GPU GUI still UNVERIFIED. Do not describe it as accelerated until the
   compositor runs through this bridge on the actual tablet. No partitions
-  flashed in this session; only the SD file-transfer request was staged.
+  flashed in this session; only root files via the SD transfer were changed.
 
 ## Handoff 2026-10-21 (вечер)
 

@@ -30,11 +30,15 @@ errors and the expected BGRA bytes for both a clear and a triangle. Only
 the real-device version verifies the pixels. It uses GLI calls throughout,
 including the ARB shader adapters used by QuartzCore.
 
-Then change backboardd's launchd ProgramArguments to:
+For a guarded compositor test, change backboardd's launchd ProgramArguments to:
 
 ```
-/usr/bin/t290launch /usr/lib/t290eagl-mesa.dylib /usr/libexec/backboardd
+/usr/bin/t290launch --test /usr/bin/eagltest /usr/lib/t290eagl-mesa.dylib /usr/libexec/backboardd
 ```
+
+The launcher waits for the test. On exit 0 it injects the compositor; on
+failure it runs backboardd with the system renderer. The off marker also
+bypasses the test. This guards test failures, not later compositor crashes.
 
 Logs go to `/private/var/tmp/t290eagl.log` and SweetGPU selector 7 (pstore).
 Look for context creation, IOSurface imports, GPU finish counts, missing
