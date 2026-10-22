@@ -18,6 +18,15 @@ on:
       sweet_board:
         description: SWEET board variant (empty = sweet phone, t290 = Galaxy Tab A 8.0 SM-T290, 4K pages + GICv2)
         default: ""
+      runner:
+        description: Hosted build runner (macos-15-intel bypasses ARM capacity limits)
+        default: macos-14
+      iig_cache_release:
+        description: Optional draft release containing verified Xcode 15 IIG outputs
+        default: ""
+      iig_cache_sha256:
+        description: SHA256 of the optional IIG cache artifact
+        default: ""
   push:
     branches: [main]
     paths:
@@ -40,10 +49,25 @@ jobs:
   build:
     # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
     # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compatible IIG cache for alternate host
+        if: inputs.iig_cache_release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CACHE_RELEASE: ${{ inputs.iig_cache_release }}
+          CACHE_SHA256: ${{ inputs.iig_cache_sha256 }}
+        run: |
+          set -euo pipefail
+          gh release download "$CACHE_RELEASE" -p iig-cache.json.xz -D iig-cache
+          printf '%s  %s\n' "$CACHE_SHA256" iig-cache/iig-cache.json.xz | shasum -a 256 -c -
+          chmod +x tools/iig-cache.py
+          echo "IIG=$GITHUB_WORKSPACE/tools/iig-cache.py" >> "$GITHUB_ENV"
+          echo "IIG_CACHE=$GITHUB_WORKSPACE/iig-cache/iig-cache.json.xz" >> "$GITHUB_ENV"
+          echo "IIG_SOURCE_ROOT=$GITHUB_WORKSPACE/dxb/xnu" >> "$GITHUB_ENV"
 
       - name: Fetch build script
         run: |
