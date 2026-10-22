@@ -5,7 +5,8 @@ Recovery 0135 installed and partition readback verified. Real boot consumed
 new bridge/test SD request, but BGRA pixel regression failed (exit 51),
 so t290launch ran backboardd with the system renderer (CPU fallback).
 Fix 25b21dd tracks upload format/type in mip compatibility; CI 39796561147
-pending. Real-device validation still required. No recovery reflash needed.
+passed. Local WSL bridge build also works; update staged on SD.
+Real-device pixel validation still required. No recovery reflash needed.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

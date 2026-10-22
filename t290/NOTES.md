@@ -6,6 +6,25 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **LOCAL WSL BRIDGE BUILD WORKS:** clang 14 + ld64.lld-14 + iPhoneOS16.5
+  SDK + Procursus ldid. See t290/eagl/LOCAL-BUILD.md; build-local.sh produced
+  dylib/test in 8 seconds. verify-local.py passed baseline ARM64, iOS16.0,
+  SHA256 code pages and signed test entitlements. gen_dispatch.py supports
+  cached 975-slot GLI layout plus iOS/Mesa GL headers. Kernel full link and
+  Mesa build still use macOS CI; do not describe all components as local.
+- Local BGRA mip-fix files: dl/local-eagl-bgra1. Bridge SHA256
+  fef0217bd0da15ef7274c4c7a867807697388fce289380a47d6fc1a2f462594f,
+  test 06a78a8bfc4901e00d95a00f148ab3847cda57aec77ed3342353c0d7d3e48c00.
+  Staged SD request 4 ops: backup old bridge/log, install local bridge/test.
+  Full 34197200-byte raw SD readback PASS, SHA256
+  1b90da4082bd6cb44311ad15f5803b5556d28707360ce656343d78397606b6f7.
+  Request NOT consumed yet. Next manual iPadOS boot, read GPU pixel test
+  result / t290launch injection status. No recovery reflash needed.
+- Cloud run **39796561147** now both jobs SUCCESS (workflow finalizing);
+  iOS bridge + Intel host Mesa + fake ES2/ES3 passed. Downloaded bridge
+  artifact dl/cloud-eagl-bgra1 as independent fallback. Deleted predecessor
+  39794145243 only after new kernel reupload; retain sole new run.
+
 - BGRA mip fix committed **25b21dd**; new CI **39796561147** reuses kernel
   from 39794145243. Keep 39794145243 until new kernel artifact reuploaded,
   then delete predecessor. Do not flash recovery: installed 0135 is enough.

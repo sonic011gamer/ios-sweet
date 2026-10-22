@@ -626,7 +626,7 @@ static void t290_delete_renderbuffers(GLsizei n, const GLuint *names)
 
 /* Time spent inside GL calls (generated adapters), for the frame statistics. */
 static inline void gl_timer_end(uint64_t *t0) { stats.glTicks += mach_absolute_time() - *t0; }
-#define T290_GL_TIMER __attribute__((cleanup(gl_timer_end))) uint64_t gl_t0 = mach_absolute_time()
+#define T290_GL_TIMER __attribute__((cleanup(gl_timer_end), unused)) uint64_t gl_t0 = mach_absolute_time()
 
 /*
  * GLES samples a texture whose minification filter needs mipmaps it does not
