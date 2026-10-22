@@ -33,10 +33,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          python3 t290/eagl/gen_dispatch.py "$sdk" t290/eagl/dispatch_generated.h
           xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
             -dynamiclib -install_name /usr/lib/t290eagl.dylib -o out/t290eagl.dylib \
+            t290/eagl/eaglshim.m -framework Foundation -framework IOKit -framework IOSurface
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
+            -dynamiclib -install_name /usr/lib/t290eagl-probe.dylib -o out/t290eagl-probe.dylib \
             t290/eagl/eaglprobe.m -framework Foundation -framework IOKit
-          codesign -s - -f out/t290eagl.dylib
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
+            -o out/eagltest t290/eagl/eagltest.m -framework Foundation -framework OpenGLES -framework IOSurface
+          codesign -s - -f out/t290eagl.dylib out/t290eagl-probe.dylib
+          codesign -s - -f --entitlements t290/ios/ent.plist out/eagltest
           otool -L out/t290eagl.dylib
       - uses: actions/upload-artifact@v4
         with:
