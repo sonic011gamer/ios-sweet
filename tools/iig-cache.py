@@ -34,7 +34,8 @@ def run(argv):
         if destination.name != key or key not in cache['files']:
             raise ValueError(f'uncached IIG output: {destination}')
     for destination, key in outputs:
-        destination.write_text(cache['files'][key], encoding='utf8', newline='\n')
+        with destination.open('w', encoding='utf8', newline='\n') as stream:
+            stream.write(cache['files'][key])
     print(f'IIG cache: {definition.name} (verified XNU inputs, Xcode 15 ABI)')
 
 

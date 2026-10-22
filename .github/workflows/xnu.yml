@@ -171,3 +171,60 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
+
+  # One workflow run produces the kernel and bridge, with a self-contained
+  # host Mesa test. No dependency on previously retained Actions history.
+  t290-graphics:
+    if: inputs.sweet_board == 't290'
+    runs-on: ${{ inputs.runner || 'macos-14' }}
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build iOS graphics bridge
+        run: |
+          set -euo pipefail
+          mkdir -p graphics-out
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          python3 t290/eagl/gen_dispatch.py "$sdk" t290/eagl/dispatch_generated.h
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
+            -dynamiclib -install_name /usr/lib/t290eagl.dylib -o graphics-out/t290eagl.dylib \
+            t290/eagl/eaglshim.m -framework Foundation -framework IOKit -framework IOSurface
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
+            -o graphics-out/eagltest t290/eagl/eagltest.m \
+            -framework Foundation -framework OpenGLES -framework IOSurface
+          codesign -s - -f graphics-out/t290eagl.dylib
+          codesign -s - -f --entitlements t290/ios/ent.plist graphics-out/eagltest
+          otool -L graphics-out/t290eagl.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t290eagl
+          path: graphics-out/
+      - name: Host Mesa tools
+        run: |
+          python3 -m pip install --break-system-packages meson==1.5.2 mako pyyaml packaging || \
+            python3 -m pip install meson==1.5.2 mako pyyaml packaging
+          brew install ninja bison flex
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+      - name: Build host Mesa
+        run: TARGET=mac WORK=$PWD/mesa-host bash t290/mesa/build-ios.sh
+      - name: ES2 and ES3 bridge regressions (fake GPU)
+        run: |
+          set -euo pipefail
+          clang -O2 -Wall -fobjc-arc -dynamiclib -o host-t290eagl.dylib t290/eagl/eaglshim.m \
+            -framework Foundation -framework IOKit -framework IOSurface
+          clang -O2 -Wall -fobjc-arc -o host-eagltest t290/eagl/eagltest.m \
+            -framework Foundation -framework IOSurface
+          codesign -s - -f host-t290eagl.dylib host-eagltest
+          export T290_MESA_LIB="$PWD/mesa-host/out/libOSMesa.8.dylib"
+          export SWEET_FAKE=1 DYLD_INSERT_LIBRARIES="$PWD/host-t290eagl.dylib"
+          perl -e 'alarm 120; exec @ARGV' ./host-eagltest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: t290-host-test
+          path: |
+            mesa-host/build.log
+            mesa-host/out/
