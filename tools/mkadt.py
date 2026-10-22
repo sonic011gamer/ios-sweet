@@ -3,6 +3,11 @@
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
 address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+--onclite: the Redmi 7 (SDM632) tree for the ONCLITE kernel instead (live FDT
+and probe results in NOTES.md): Gold cluster only, GICv2, ramoops console.
+--msm8994: the Lumia 950 XL (SDM810) tree for the MSM8994 kernel instead
+(lk2nd's msm8994 target and the WOA UEFI memory map, NOTES.md): A57 cluster
+only, GICv2, ramoops console.
 """
 import hashlib, os, struct, sys
 
@@ -31,9 +36,63 @@ TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
+# QEMU virt with gic-version=2: the distributor (gic_dist) at 0x08000000 and
+# the CPU interface (gic_cpu) at 0x08010000 - "info mtree" on the host.
+# (0x08020000 is the GICv2m, not the CPU interface.)
+QEMU_GICD_V2, QEMU_GICC_V2 = 0x08000000, 0x08010000
+QEMU_GICD_V2_SIZE, QEMU_GICC_V2_SIZE = 0x10000, 0x2000
 QEMU_VTIMER_INTID = 27
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
+
+# onclite (Redmi 7, SDM632). Kernel RAM: above the splash/ramoops 32MB block
+# (0x90000000) up to the end of DDR; every no-map carve-out is below 0x8f100000.
+ONC_PHYS_BASE, ONC_MEM_SIZE = 0x92000000, 0x6e000000
+# The top 12 MiB are not given to xnu: AppleCLCD's 1125x2436 BGRA canvas
+# (SweetFramebuffer.cpp), only ever mapped write-combined, scaled into the
+# 720x1520 RGB888 splash.
+ONC_PANEL_SIZE = 0xc00000
+ONC_PANEL_BASE = ONC_PHYS_BASE + ONC_MEM_SIZE - ONC_PANEL_SIZE
+ONC_GICD, ONC_GICD_SIZE = 0x0b000000, 0x1000     # qcom,msm-qgic2
+ONC_GICC, ONC_GICC_SIZE = 0x0b002000, 0x1000
+ONC_VTIMER_INTID = 20                            # DT timer: virtual = PPI 4
+ONC_ECID = 0x4f4e434c49544501                    # 'ONCLITE' + 1, synthetic
+
+# msm8994 (Lumia 950 XL, SDM810). The phone has 3 GB of RAM in two banks
+# with a hole between them:
+#   0x00000000-0x5FFFFFFF  1.5 GB  (the bootloader bank: the boot loader
+#                                    at 0x80000, the device tree at
+#                                    0x2500000, the display framebuffer at
+#                                    0x03400000 and the ramdisk at
+#                                    0x04000000 sit in it)
+#   0x60000000-0x7FFFFFFF  unmapped (512 MB, there is no memory behind it)
+#   0x80000000-0xDFFFFFFF  1.5 GB
+# 0xE0000000 is the last address the phone can touch.
+#
+# xnu's window is the first 3 GB: 0x00000000-0xBFFFFFFF. The kernel image
+# lands 16 MB into it, at 0x01004000. Two ranges inside the window are
+# never handed to the VM: the secure world (0x06500000-0x0EF00000) and the
+# hole between the banks. The console block (0xd9c00000, with the log zone
+# at the address the phone's own device tree reserves for ramoops) is in
+# the upper bank, above the window, so the kernel cannot allocate it.
+MSM_PHYS_BASE, MSM_MEM_SIZE = 0x00000000, 0xc0000000
+MSM_RAM = ((0x00000000, 0x60000000), (0x80000000, 0x60000000))
+MSM_PANEL_SIZE = 0xc00000                        # AppleCLCD's 1125x2436 BGRA canvas
+MSM_PANEL_BASE = MSM_PHYS_BASE + MSM_MEM_SIZE - MSM_PANEL_SIZE
+MSM_GICD, MSM_GICD_SIZE = 0xf9000000, 0x10000    # KPSS GICv2 distributor
+MSM_GICC, MSM_GICC_SIZE = 0xf9002000, 0x2000     # KPSS GICv2 CPU interface
+MSM_VTIMER_INTID = 20                            # DT timer: virtual = PPI 4
+MSM_ECID = 0x4d534d3839393401                    # 'MSM8994' + 1, synthetic
+# Console: the 2 MB block the kernel maps VA=PA as Normal Non-Cacheable,
+# with the ramoops zone at the address the phone's own device tree reserves
+# (see pexpert/arm64/MSM8994.h).
+MSM_PLOG_BLOCK_PA = 0xd9c00000
+MSM_PLOG_PA = 0xd9d00000
+MSM_PLOG_SIZE = 0x100000
+# The framebuffer the bootloader leaves running: 1080x1920, 32bpp.
+MSM_FB_BASE = 0x03400000
+MSM_FB_SIZE = 0x800000
+MSM_FB_W, MSM_FB_H, MSM_FB_STRIDE = 1080, 1920, 1080 * 4
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
 # derives product type, device class, home-button-less UI, artwork etc. from
@@ -61,6 +120,20 @@ u64 = lambda *v: struct.pack('<%dQ' % len(v), *v)
 cstr = lambda s: s.encode() + b'\0'
 
 
+def shim_name(onclite, msm8994):
+    """The /chosen firmware-version of the board's boot shim."""
+    if msm8994:
+        return 'msm8994-shim'
+    return 'onclite-shim' if onclite else 'sweet-shim'
+
+
+def ecid(onclite, msm8994):
+    """The synthetic ECID (/chosen unique-chip-id) of the board."""
+    if msm8994:
+        return MSM_ECID
+    return ONC_ECID if onclite else SWEET_ECID
+
+
 def node(name, props=(), children=()):
     n = adt.Node()
     n.props = [('name', 0, cstr(name))] + [(k, 0, v) for k, v in props]
@@ -68,9 +141,20 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
+def build(seed=None, qemu=False, highmem=False, onclite=False, msm8994=False,
+          fb_base=None, dram_base=None, boot_mpidr=0x100):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    if onclite:
+        phys_base, mem_size = ONC_PHYS_BASE, ONC_MEM_SIZE - ONC_PANEL_SIZE
+    if msm8994:
+        phys_base, mem_size = MSM_PHYS_BASE, MSM_MEM_SIZE - MSM_PANEL_SIZE
+        panel_base = MSM_PANEL_BASE
+        if dram_base is not None:
+            # The window moves with its base (the emulator needs it inside
+            # QEMU's RAM, which starts at 0x40000000).
+            phys_base = dram_base
+            panel_base = phys_base + MSM_MEM_SIZE - MSM_PANEL_SIZE
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
@@ -82,8 +166,8 @@ def build(seed=None, qemu=False, highmem=False):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('firmware-version', cstr('sweet-shim')),
-        ('system-firmware-version', cstr('sweet-shim')),
+        ('firmware-version', cstr(shim_name(onclite, msm8994))),
+        ('system-firmware-version', cstr(shim_name(onclite, msm8994))),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -101,7 +185,7 @@ def build(seed=None, qemu=False, highmem=False):
         # files), so e.g. DataMigration never records LastSystemVersion and
         # migrates on every boot. Synthetic ECID (not the phone's); chip-id
         # of the A11 that the iPhone X userland expects.
-        ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
+        ('unique-chip-id', struct.pack('<Q', ecid(onclite, msm8994))),
         ('chip-id', u32(0x8015)),
         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
@@ -145,6 +229,60 @@ def build(seed=None, qemu=False, highmem=False):
             ('peripheral-frequency', u32(timebase)),
             ('fixed-frequency', u32(timebase)),
         ]))
+    if msm8994:
+        # The four Cortex-A57 (big cluster, MPIDR 0x100-0x103); the shim
+        # starts xnu on MPIDR 0x100, listed first so it is logical CPU 0.
+        # With --boot-mpidr=0 the shim hands over on the core LK booted us
+        # on instead (an A53, MPIDR 0x000): the tree then lists that one
+        # core as the boot CPU. The compatible string stays the one the
+        # SweetCPU driver matches on.
+        cpu_nodes = []
+        for core in range(1 if boot_mpidr == 0 else 4):
+            cpu_nodes.append(node(f'cpu{core}', [
+                ph(),
+                ('device_type', cstr('cpu')),
+                ('compatible', cstr('qcom,cortex-a57') + cstr('ARM,v8')),
+                ('reg', u32(boot_mpidr | core)),  # MPIDR Aff1 = 1 (big cluster), Aff0 = core
+                ('cpu-id', u32(core)),
+                ('cluster-id', u32(0)),
+                ('cluster-type', u32(0)),
+                ('die-cluster-id', u32(0)),
+                ('cluster-core-id', u32(core)),
+                ('l2-cache-id', u32(1)),     # one L2 for the A57 cluster
+                ('l3-cache-id', u32(0)),
+                ('state', cstr('running' if core == 0 else 'stopped')),
+                ('timebase-frequency', u32(TIMEBASE)),
+                ('clock-frequency', u32(2000000000)),
+                ('bus-frequency', u32(100000000)),
+                ('memory-frequency', u32(933000000)),
+                ('peripheral-frequency', u32(TIMEBASE)),
+                ('fixed-frequency', u32(TIMEBASE)),
+            ]))
+    if onclite:
+        # Kryo 250 Gold only (the Silver cores lack the 16K granule); the shim
+        # starts xnu on MPIDR 0x100, listed first so it is logical CPU 0.
+        cpu_nodes = []
+        for core in range(4):
+            cpu_nodes.append(node(f'cpu{core}', [
+                ph(),
+                ('device_type', cstr('cpu')),
+                ('compatible', cstr('qcom,kryo250') + cstr('ARM,v8')),
+                ('reg', u32(0x100 | core)),  # MPIDR Aff1 = 1 (Gold cluster), Aff0 = core
+                ('cpu-id', u32(core)),
+                ('cluster-id', u32(0)),
+                ('cluster-type', u32(0)),
+                ('die-cluster-id', u32(0)),
+                ('cluster-core-id', u32(core)),
+                ('l2-cache-id', u32(1)),     # one L2 for the Gold cluster
+                ('l3-cache-id', u32(0)),
+                ('state', cstr('running' if core == 0 else 'stopped')),
+                ('timebase-frequency', u32(TIMEBASE)),
+                ('clock-frequency', u32(1804800000)),
+                ('bus-frequency', u32(100000000)),
+                ('memory-frequency', u32(933000000)),
+                ('peripheral-frequency', u32(TIMEBASE)),
+                ('fixed-frequency', u32(TIMEBASE)),
+            ]))
     cpus = node('cpus', [ph(), ('#address-cells', u32(1)),
                          ('#size-cells', u32(0))], cpu_nodes)
 
@@ -155,6 +293,36 @@ def build(seed=None, qemu=False, highmem=False):
         ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
         ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
     ])
+    if onclite:
+        # GICv2 (pe_fiq.c HAS_GIC_V2): reg = <GICD size GICC size>, arm-io relative
+        gic = node('gic', [
+            ph(),
+            ('compatible', cstr('arm,gic-400')),
+            ('interrupt-controller', b''),
+            ('virtual-timer-intid', u32(ONC_VTIMER_INTID)),
+            ('reg', u64(ONC_GICD - SOC_BASE, ONC_GICD_SIZE, ONC_GICC - SOC_BASE, ONC_GICC_SIZE)),
+        ])
+    if msm8994:
+        # GICv2 in the KPSS: GICD 0xf9000000, GICC 0xf9002000 (lk2nd's
+        # platform/msm8994/include/platform/iomap.h).
+        gic = node('gic', [
+            ph(),
+            ('compatible', cstr('arm,gic-400')),
+            ('interrupt-controller', b''),
+            ('virtual-timer-intid', u32(MSM_VTIMER_INTID)),
+            ('reg', u64(MSM_GICD - SOC_BASE, MSM_GICD_SIZE, MSM_GICC - SOC_BASE, MSM_GICC_SIZE)),
+        ])
+        if qemu:
+            # the same GICv2, but in QEMU's virt address space, and the
+            # generic timer's vtimer INTID (QEMU: 27, the phone: 20).
+            gic = node('gic', [
+                ph(),
+                ('compatible', cstr('arm,gic-400')),
+                ('interrupt-controller', b''),
+                ('virtual-timer-intid', u32(QEMU_VTIMER_INTID)),
+                ('reg', u64(QEMU_GICD_V2 - SOC_BASE, QEMU_GICD_V2_SIZE,
+                           QEMU_GICC_V2 - SOC_BASE, QEMU_GICC_V2_SIZE)),
+            ])
     arm_io = node('arm-io', [
         ph(),
         ('device_type', cstr('sweet-io')),
@@ -212,6 +380,62 @@ def build(seed=None, qemu=False, highmem=False):
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
+    if msm8994:
+        # Console into the ramoops-style zone (pe_serial.c, sweet_early.c):
+        # the zone is fixed in the kernel (MSM8994.h), the node only enables
+        # it. No UFS: eMMC phone, and the SDHCI driver is not written yet.
+        ramoops = node('sweet-ramoops', [ph(), ('reg', u64(MSM_PLOG_PA, MSM_PLOG_SIZE))])
+        # The framebuffer the bootloader leaves running: the kernel's
+        # console (pe_serial.c's fbcon) draws the log there.
+        fbcon = node('sweet-fbcon', [
+            ph(),
+            ('reg', u64(fb_base or MSM_FB_BASE, MSM_FB_SIZE)),
+            ('width', u32(MSM_FB_W)),
+            ('height', u32(MSM_FB_H)),
+            ('stride', u32(MSM_FB_STRIDE)),
+        ])
+        # The real RAM of the phone, for the loader (the ADT's dram-base and
+        # dram-size are the window xnu gets, not the whole phone).
+        memory = node('memory', [
+            ph(),
+            ('device_type', cstr('memory')),
+            ('reg', u64(*[v for base, size in MSM_RAM for v in (base, size)])),
+        ])
+        # AppleCLCD's 1125x2436 BGRA canvas, scaled into the 2560x1440
+        # framebuffer the bootloader leaves running.
+        panel = node('msm8994-panel', [ph(), ('reg', u64(panel_base, MSM_PANEL_SIZE))])
+        return node('device-tree', [
+            ph(),
+            ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('microsoft,lumia950xl') + cstr('qcom,msm8994') + cstr('AppleARM')),
+            ('model', cstr('iPhone10,3')),
+            ('target-type', cstr('D22')),
+            ('target-sub-type', cstr('D22AP')),
+            ('manufacturer', cstr('Apple Inc.')),
+            ('#address-cells', u32(2)),
+            ('#size-cells', u32(2)),
+        ], [chosen, defaults, cpus, arm_io, memory, ramoops, fbcon, panel, buttons] + product)
+
+    if onclite:
+        # Console into the ramoops console zone (pe_serial.c, sweet_early.c); the
+        # zone is fixed in the kernel, the node only enables it. No fbcon (LK
+        # switches the panel off for fastboot boot), no UFS (eMMC phone).
+        ramoops = node('sweet-ramoops', [ph(), ('reg', u64(0x91400000, 0x200000))])
+        # bsd/dev/onclite_emmc.c: the eMMC SDHCI host (sdhci@7824900 "hc_mem",
+        # then the vendor "core_mem"; absolute physical reg like /sweet-ufs).
+        emmc = node('onclite-emmc', [ph(), ('compatible', cstr('qcom,sdhci-msm')),
+                                     ('reg', u64(0x07824900, 0x500, 0x07824000, 0x800))])
+        panel = node('onclite-panel', [ph(), ('reg', u64(ONC_PANEL_BASE, ONC_PANEL_SIZE))])
+        return node('device-tree', [
+            ph(),
+            ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,onclite') + cstr('qcom,sdm632') + cstr('AppleARM')),
+            ('model', cstr('iPhone10,3')),
+            ('target-type', cstr('D22')),
+            ('target-sub-type', cstr('D22AP')),
+            ('manufacturer', cstr('Apple Inc.')),
+            ('#address-cells', u32(2)),
+            ('#size-cells', u32(2)),
+        ], [chosen, defaults, cpus, arm_io, ramoops, emmc, panel, buttons] + product)
+
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
@@ -228,7 +452,25 @@ def build(seed=None, qemu=False, highmem=False):
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    fb_base = None
+    dram_base = None
+    boot_mpidr = 0x100
+    for a in sys.argv[1:]:
+        if a.startswith('--fb-base='):
+            fb_base = int(a.split('=', 1)[1], 0)
+        elif a.startswith('--boot-mpidr='):
+            # The MPIDR of the core xnu starts on: 0x100 is the A57 cluster
+            # (the shim's PSCI CPU_ON), 0x0 the A53 LK booted the shim on
+            # (the shim's "cpuctl=local").
+            boot_mpidr = int(a.split('=', 1)[1], 0)
+        elif a.startswith('--dram-base='):
+            # The base of the window xnu gets. The phone's window starts at 0
+            # (3 GB), but the QEMU virt board's RAM starts at 0x40000000, so
+            # the emulator run needs the window moved there.
+            dram_base = int(a.split('=', 1)[1], 0)
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                 onclite='--onclite' in sys.argv, msm8994='--msm8994' in sys.argv,
+                 fb_base=fb_base, dram_base=dram_base, boot_mpidr=boot_mpidr)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

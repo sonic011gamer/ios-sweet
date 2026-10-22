@@ -62,25 +62,25 @@ index 0000000..25f7abe
 +extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
 +extern void clean_dcache64(addr64_t addr, unsigned count, int phys);
 +
-+/* ---- hardware (live FDT of SM-T290, board P81080BA5) ---- */
-+#define SDC2_PHYS               0x07864000UL    /* core_mem; SDHCI at +0x900 */
++/* ---- hardware (MSM8994 based on iomap) ---- */
++#define SDC2_PHYS               0xF98A4000UL    /* MSM_SDC2_BASE */
 +#define SDC2_HC                 0x900
-+#define GCC_SDCC2_PHYS          0x01843000UL    /* GCC 0x1800000 + 0x43000 */
-+#define TLMM_SDC2_PHYS          0x01109000UL
-+#define SMEM_PHYS               0x86300000UL
++#define GCC_SDCC2_PHYS          0xFC400000UL    /* CLK_CTL_BASE */
++#define TLMM_SDC2_PHYS          0xFD512000UL    /* TLMM page containing SDC2_HDRV_PULL_CTL */
++#define SMEM_PHYS               0x06A00000UL    /* MSM_SHARED_BASE */
 +#define SMEM_SIZE               0x100000UL
-+#define RPM_MSG_PHYS            0x00060000UL    /* smem aux-mem1 */
++#define RPM_MSG_PHYS            0x06800000UL    /* Standard MSM8994 MSG RAM, update if SMEM layout differs */
 +#define RPM_MSG_SIZE            0x8000UL
-+#define APCS_IPC_PHYS           0x0b011000UL    /* + 8: IPC interrupt */
++#define APCS_IPC_PHYS           0xF900D000UL    /* APCS_ALIAS0_IPC_INTERRUPT page */
 +
-+/* GCC SDCC2 (offsets in the 0x43000 page) */
-+#define GCC_CMD                 0x004
-+#define GCC_CFG                 0x008
-+#define GCC_M                   0x00c
-+#define GCC_N                   0x010
-+#define GCC_D                   0x014
-+#define GCC_APPS_CBCR           0x018
-+#define GCC_AHB_CBCR            0x01c
++/* GCC SDCC2 (offsets in the CLK_CTL_BASE page) */
++#define GCC_APPS_CBCR           0x504           /* SDCC2_APPS_CBCR */
++#define GCC_AHB_CBCR            0x508           /* SDCC2_AHB_CBCR */
++#define GCC_CMD                 0x510           /* SDCC2_CMD_RCGR */
++#define GCC_CFG                 0x514           /* SDCC2_CFG_RCGR */
++#define GCC_M                   0x518           /* SDCC2_M */
++#define GCC_N                   0x51C           /* SDCC2_N */
++#define GCC_D                   0x520           /* SDCC2_D */
 +#define CBCR_CLK_OFF            (1U << 31)
 +
 +/* SDHCI */
@@ -360,8 +360,8 @@ index 0000000..25f7abe
 +	if (error) {
 +		return error;
 +	}
-+	uint32_t a12 = rpm_req(RPM_LDOA, 12, on_2v95, 2);
-+	uint32_t a11 = rpm_req(RPM_LDOA, 11, on_2v95, 2);
++	uint32_t a12 = rpm_req(RPM_LDOA, 21, on_2v95, 2);
++	uint32_t a11 = rpm_req(RPM_LDOA, 13, on_2v95, 2);
 +	if (!a12 || !a11) {
 +		printf("SWEET SDHC: RPM did not acknowledge L12/L11 (%u/%u)\n", a12, a11);
 +		return EIO;
@@ -581,7 +581,7 @@ index 0000000..25f7abe
 +sd_card_init(void)
 +{
 +	/* pads: clk 16 mA, cmd/data pull-up 10 mA (Linux sdc2 "active") */
-+	wr32(sd.tlmm, 3 << 11 | 3 << 9 | 7 << 6 | 4 << 3 | 4);
++	wr32(sd.tlmm + 0x48, 3 << 11 | 3 << 9 | 7 << 6 | 4 << 3 | 4);
 +
 +	if (!gcc_branch_on(GCC_AHB_CBCR)) {
 +		printf("SWEET SDHC: SDCC2 AHB clock stays off\n");
