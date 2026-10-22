@@ -1,0 +1,25 @@
+diff -ruN a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-22 20:00:05.505392100 +0800
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-22 20:00:05.609187600 +0800
+@@ -603,7 +603,20 @@
+ 	    sf->memory->getLength();
+ 	if (ok) {
+ 		uint64_t t0 = mach_absolute_time();
+-		t290Convert(sf->kernelAddress() + sf->offset, sf->bytesPerRow);
++		/*
++		 * CA's second full-screen buffer: read it through the cached kernel
++		 * alias of its buffer after dropping stale lines (GPU writes bypass
++		 * the cache), not through the uncached IOSurface mapping.
++		 */
++		IOBufferMemoryDescriptor *bmd = OSDynamicCast(IOBufferMemoryDescriptor, sf->memory);
++		uintptr_t pix = bmd != NULL ? (uintptr_t)bmd->getBytesNoCopy() : 0;
++		if (pix != 0) {
++			pix += sf->offset;
++			FlushPoC_DcacheRegion((vm_offset_t)pix, (size_t)sf->bytesPerRow * fPanelH);
++		} else {
++			pix = sf->kernelAddress() + sf->offset;
++		}
++		t290Convert(pix, sf->bytesPerRow);
+ 		uint64_t t1 = mach_absolute_time();
+ 		fStatConv += t1 - t0;
+ 		if (fStatFrames++ == 0) {

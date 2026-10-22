@@ -130,6 +130,7 @@ static const struct { const void *replacement, *original; } surface_interpose[] 
     void *image;
     uint32_t seed;
     BOOL gpuDirty;
+    BOOL scanout;                       /* full-screen: CA may present it */
 }
 - (void)upload;
 - (void)publish;
@@ -224,7 +225,8 @@ enum { DRAW_PRIMITIVES, DRAW_CLEAR, DRAW_ALL_ROWS };
     uint32_t _errors;
     NSMutableDictionary<NSNumber *, T290SurfaceImage *> *_framebuffers;
     NSMutableDictionary<NSNumber *, NSNumber *> *_attachmentNames;
-    T290SurfaceImage *_drawImage;       /* padded image behind _drawFbo */
+    T290SurfaceImage *_drawImage;       /* padded or scanout image behind _drawFbo */
+    BOOL _presentDirty;                 /* GPU drew into a scanout surface */
     T290SurfaceImage *_bound[T290_UNITS];  /* padded 2D texture per unit */
     GLuint _boundName[T290_UNITS], _unit, _units;
     GLint _viewport[4], _scissor[4];
@@ -384,21 +386,24 @@ static void t290_flush(void)
     T290Context *ctx = current_ctx();
     ++ctx->_flushCount;
     gl.Flush();
-    /* The framebuffer driver consumes surface 1 on the CPU right after
-     * CA's flush. Intermediate GPU textures need no CPU round trip. */
+    /* CA flushes, then swaps a full-screen surface (1 or its second
+     * buffer) and the framebuffer driver converts it on the CPU at once:
+     * the frame must be complete. Intermediate GPU textures need no wait. */
+    if (!ctx->_presentDirty) return;
+    ctx->_presentDirty = NO;
+    if (ctx->_gpuWork) t290_wait();
     T290SurfaceImage *display = ctx.sharegroup.display;
     if (display && display->gpuDirty) {
-        if (ctx->_gpuWork) t290_wait();
         [display publish];
         [ctx.sharegroup.dirty removeObject:display];
-        frame_stats(ctx);
     }
+    frame_stats(ctx);
 }
 
 static void update_draw_image(T290Context *ctx)
 {
     T290SurfaceImage *img = ctx->_framebuffers[@(ctx->_drawFbo)];
-    ctx->_drawImage = img && (img->backing || img == ctx.sharegroup.display) ? img : nil;
+    ctx->_drawImage = img && (img->backing || img->scanout) ? img : nil;
 }
 static void t290_bind_framebuffer(GLenum target, GLuint name)
 {
@@ -491,6 +496,8 @@ static void t290_before_draw(int kind)
     ctx->_gpuWork = YES;
     T290SurfaceImage *img = ctx->_drawImage;
     if (!img) return;
+    if (img->scanout) ctx->_presentDirty = YES;
+    if (!img->backing) return;          /* zero-copy: nothing to copy back */
     /* Rows the GL call can touch: FBO row 0 is the first row in memory. */
     long y0 = 0, y1 = (long)img->rows;
     if (kind == DRAW_PRIMITIVES) {
@@ -836,16 +843,15 @@ static uintptr_t unsupported_private(void *ctx, ...)
         set_max_level(self, target, 0);     /* an IOSurface has no mipmaps */
     }
     images[@(name)] = mirror;
+    /* the scanout surfaces: surface 1 and CA's other full-screen buffer */
+    if ((w >= 800 && h >= 1280) || IOSurfaceGetID(surface) == 1) mirror->scanout = YES;
+    if (IOSurfaceGetID(surface) == 1) _sharegroup.display = mirror;
     uint64_t attachmentName = (uint64_t)(GLuint)name | (target == 0x8d41 ? 0x100000000ull : 0);
     for (NSNumber *fbo in _attachmentNames)
         if ([_attachmentNames[fbo] unsignedLongLongValue] == attachmentName)
             _framebuffers[fbo] = mirror;
     update_draw_image(self);
     if (target == 0x0de1) bind_unit(self, (GLuint)name, mirror);
-    /* the scanout surface: the framebuffer driver reads it right after the
-     * flush, so that flush waits for the GPU (zero-copy with kernel 0133,
-     * padded with older kernels) */
-    if (IOSurfaceGetID(surface) == 1) _sharegroup.display = mirror;
     static unsigned count;
     if (count++ < 12) plog("t290eagl: imported surface %u %dx%d target %#x invert %d",
         IOSurfaceGetID(surface), w, h, target, invert);
