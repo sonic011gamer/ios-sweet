@@ -17,7 +17,8 @@ from mkadt import u32, u64, cstr, SOC_BASE  # noqa: E402
 # QGIC2: GICD and GICC for MSM8994
 GICD, GICD_SIZE = 0xf9000000, 0x1000
 GICC, GICC_SIZE = 0xf9002000, 0x1000
-VTIMER_INTID = 27             # timer PPI for Arch Timer (GICv2 usually maps this to 27)
+VTIMER_INTID = 20             # lk2nd platform/msm8994 irqs.h: INT_QTMR_VIRTUAL_TIMER_EXP = PPI 4
+                              # (the QEMU GIC keeps its own separate value below)
 TIMEBASE = 19200000           # QCOM standard 19.2MHz XO
 NCPUS = 8                     # 4x Cortex-A53 + 4x Cortex-A57
 CPU_HZ = 2000000000
@@ -32,7 +33,7 @@ FB_W, FB_H = 1080, 1920
 FB_BPP, FB_SHIFT = 4, 0       # 32 bpp (XRGB8888), standard linear layout
 
 QEMU_GICD, QEMU_GICC, QEMU_TIMEBASE = 0x08000000, 0x08010000, 62500000
-QEMU_VTIMER_INTID = 27
+QEMU_VTIMER_INTID = 27        # QEMU virt only
 QEMU_VIRTIO_MMIO = 0x0a000000
 
 # /product of the real iPad 5 (J71sAP) device tree
@@ -125,10 +126,10 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1, native=False):
                       ('reg', 0, u64(QEMU_VIRTIO_MMIO, 32 * 0x200))]
         root.children.append(vblk)
 
-    # Append Cityman and MSM8994 targets while preserving iPad6,11 for XNU match checks
-    set_props(root, compatible=cstr('D22AP') + cstr('iPhone11,3') + cstr('microsoft,cityman') +
-              cstr('qcom,msm8994') + cstr('AppleARM'),
-              model=cstr('iPad6,11'), target_type=cstr('J71s'), target_sub_type=cstr('J71sAP'))
+    # Append Cityman and MSM8994 targets while preserving iPhone10,3 for XNU match checks
+    set_props(root, compatible=cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
+              cstr('microsoft,cityman') + cstr('qcom,msm8994') + cstr('AppleARM'),
+              model=cstr('iPhone10,3'), target_type=cstr('D22'), target_sub_type=cstr('D22AP'))
     return root
 
 if __name__ == '__main__':
