@@ -6,6 +6,22 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **Latest verified state:** kernel job 39788991320 SUCCESS; downloaded kernel
+  SHA256 `8dcd7c61581fbd18a4a3d5bd11cbe3d7f2ef25497815f8cb3d8cc79c4e5037f5`
+  matches artifact SHA256SUMS. Repacked recovery-0135.img in dl/k-t290-0135,
+  SHA256 `d2ef0bbfea670ea53505e27993e63874d940df2fd9240f82e71e96b003e1a8a5`;
+  shim/DTB, ADT, bootargs, payload and Samsung footer checks PASS.
+- Android ADB connected. Actual recovery backed up and device hash matched
+  `51d3531b86f0412cb38820b5f13020b783a763a85128f15607708968aa1eb9ee`
+  in ios-t290/backup-20261022-gpu0135/recovery-before-0135.img (64 MiB).
+  No recovery partition write yet; 0135 approval still pending.
+- Fixed combined workflow dispatched as **39792400349**, reusing verified
+  kernel from 39788991320; both jobs initially queued. Keep predecessor
+  until new build job downloads/reuploads artifact, then delete predecessor.
+  Final bridge tests/artifact and hardware validation remain pending.
+
+
+
 - **CURRENT sole Actions run: 39788991320 (67a1508), Intel, XNU Build still
   in progress at the latest user status request.** Its t290-graphics job
   failed linking the iOS bridge: new ld forbids interpose tuples in a dylib
