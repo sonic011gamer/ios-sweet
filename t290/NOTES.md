@@ -46,10 +46,15 @@
   Preserved shim/DTB, ADT, boot args and opaque AVB metadata; unpack/check
   passed. Pushed to `/data/local/tmp/recovery-0130.img`; device SHA matches.
   Recovery is still the backed-up dba7a21a... image; partition size 67108864.
-- Next: get explicit permission to write `/dev/block/by-name/recovery` as
-  required by AGENTS.md, then write the prepared image and compare the full
-  partition SHA256. Installation is NOT authorized yet. Existing launchd
-  guard and bridge4 can test kernel 0130 unchanged after the write.
+- **User explicitly approved writing recovery** (reply "Да, записать recovery"
+  on 2026-10-22). Do not ask for permission again. The write has NOT happened:
+  adb disconnected before the flash-helper upload. PC adb restart found the
+  device offline; user asked to reconnect USB / unlock Android / accept USB
+  debugging if requested. Continue when adb becomes `device`.
+- Approved flash helper `dl/eagl-k0130/flash-approved.sh` verifies image hash,
+  original partition hash and 64 MiB partition size before dd, then syncs
+  and verifies the entire partition SHA256. Push it and run via su when the
+  connection returns. Existing guard and bridge4 can test kernel 0130.
 - `t290-xfer.ps1` now checks every adb exit code and refuses to use stale
   local transfer headers after connection errors. Tested normal result
   reading and an injected native-command failure (exit 7); both pass.
