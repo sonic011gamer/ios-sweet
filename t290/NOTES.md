@@ -6,6 +6,17 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **USER CHOSE CLOUD BUILD FOR TABLET.** Replaced the unconsumed local
+  request (state 0, 0/4) with cloud artifact from run 39796561147.
+  SD request 4 ops: backup existing bridge/log to dl/cloud-eagl-bgra1/before,
+  PUT cloud t290eagl.dylib and eagltest mode 755. Full 34233456-byte request
+  readback PASS; SHA256
+  e4172f9b4e2253463c1c1c2fbad9b3cd301042a6160e69ebc9a0dba1d738726b.
+  Cloud bridge SHA f801ad5756a96b6a9ac06dc9dc1ee7f536dfc88203461e0bd303f8f5e3d49b84;
+  test SHA 5dcd88489c959aa0a4d06adb9b79f86c3368c6a5213754740764a24786d5b440.
+  Exact manifest dl/cloud-eagl-bgra1/sd-staged.json. NOT installed in HFS+
+  until next manual iPadOS boot. Recovery 0135 already installed; no flash.
+
 - **LOCAL WSL BRIDGE BUILD WORKS:** clang 14 + ld64.lld-14 + iPhoneOS16.5
   SDK + Procursus ldid. See t290/eagl/LOCAL-BUILD.md; build-local.sh produced
   dylib/test in 8 seconds. verify-local.py passed baseline ARM64, iOS16.0,
