@@ -1,0 +1,137 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 3855850..e06abff 100755
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -145,6 +145,9 @@ sp_allowed(unsigned sid, unsigned peripheral)
+ 	if (sid == 1 && peripheral == 0x20) {	/* PM8953 S5: APC (CPU) rail, read only */
+ 		return true;
+ 	}
++	if (sid == 2 && peripheral == 0xb1) {	/* PMI632 QG SDAM: Android's saved SOC */
++		return true;
++	}
+ #endif
+ 	return false;
+ }
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index e57b8ea..b3989f7 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -15,7 +15,11 @@
+ #include "../../../bsd/dev/sweet_spmi.h"
+ /* Battery capacity (mAh): sweet DT nominal 5020; SM-T290 5100 */
+ #if defined(SWEET_T290)
+-#define SWEET_BATTERY_MAH 5100u
++#define SWEET_BATTERY_MAH 5111u        /* Android charge_full / charge_full_design */
++/* qpnp-qg SDAM (PMI632 0xb100): valid flag and last SOC (%) */
++#define SWEET_QG_SDAM           0xb100u
++#define SWEET_QG_SDAM_VALID     0x46u
++#define SWEET_QG_SDAM_SOC       0x47u
+ #else
+ #define SWEET_BATTERY_MAH 5020u
+ #endif
+@@ -32,6 +36,12 @@ private:
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+ 	int fLastMode;
++	/* charge counter: µAh in the battery, valid once seeded */
++	bool fCounting;
++	int64_t fChargeUah;
++	uint64_t fLastPoll;
++	int fLastMa;
++	void seedFromSdam(unsigned mv);
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+ 	void publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -56,6 +66,10 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
++	fCounting = false;
++	fChargeUah = 0;
++	fLastPoll = 0;
++	fLastMa = 0;
+ 	if (dictionary) {
+ 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
+ 		if (!it) {
+@@ -207,6 +221,40 @@ SweetBattery::estimatePercent(unsigned mv)
+ 	return 100;
+ }
+ 
++/*
++ * Seed the charge counter with the SOC Android's fuel gauge last saved; if
++ * there is none, with the voltage estimate (logged as such).
++ */
++void
++SweetBattery::seedFromSdam(unsigned mv)
++{
++	uint8_t dump[32], valid = 0, soc = 0xff;
++	bool ok = true;
++	for (unsigned i = 0; i < sizeof(dump); i++) {
++		ok = ok && !sweet_spmi_read(SWEET_PMIC_CHG_SID, SWEET_QG_SDAM + 0x40 + i, &dump[i]);
++	}
++	if (ok) {
++		valid = dump[SWEET_QG_SDAM_VALID - 0x40];
++		soc = dump[SWEET_QG_SDAM_SOC - 0x40];
++		IOLog("SWEET BATTERY: QG SDAM 0xb140: %02x %02x %02x %02x %02x %02x %02x %02x "
++		    "%02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    dump[0], dump[1], dump[2], dump[3], dump[4], dump[5], dump[6], dump[7],
++		    dump[8], dump[9], dump[10], dump[11], dump[12], dump[13], dump[14], dump[15],
++		    dump[16], dump[17], dump[18], dump[19], dump[20], dump[21], dump[22], dump[23]);
++	}
++	unsigned percent;
++	if (ok && valid && soc <= 100) {
++		percent = soc;
++		IOLog("SWEET BATTERY: SOC %u%% from Android's fuel gauge (SDAM valid %#x)\n", soc, valid);
++	} else {
++		percent = estimatePercent(mv);
++		IOLog("SWEET BATTERY: no saved SOC (read %d valid %#x soc %u), voltage estimate %u%%\n",
++		    ok, valid, soc, percent);
++	}
++	fChargeUah = (int64_t)SWEET_BATTERY_MAH * 1000 * percent / 100;
++	fCounting = true;
++}
++
+ void
+ SweetBattery::poll(void)
+ {
+@@ -246,8 +294,40 @@ SweetBattery::poll(void)
+ 		/* Linux: negative=charging; IOPMPowerSource: positive=charging, mA. */
+ 		ma = (int)(-((int64_t)signedRaw * (subtype == 3 ? 152588 : 305176)) / 1000000);
+ 	}
++#if defined(SWEET_T290)
++	/* Count charge: trapezoid of the last two current samples over the poll gap. */
++	uint64_t now = mach_absolute_time();
++	if (!fCounting) {
++		seedFromSdam(mv);
++	} else if (currentValid && fLastPoll) {
++		uint64_t ns;
++		absolutetime_to_nanoseconds(now - fLastPoll, &ns);
++		if (ns < 600ull * NSEC_PER_SEC) {       /* skip gaps across sleep */
++			fChargeUah += (int64_t)(ma + fLastMa) * (int64_t)(ns / 1000000ull) / 7200;
++		}
++	}
++	fLastPoll = now;
++	fLastMa = currentValid ? ma : 0;
++	const int64_t fullUah = (int64_t)SWEET_BATTERY_MAH * 1000;
++	if (full) {
++		fChargeUah = fullUah;
++	}
++	if (fChargeUah > fullUah) {
++		fChargeUah = fullUah;
++	}
++	if (fChargeUah < 0) {
++		fChargeUah = 0;
++	}
++	unsigned percent = (unsigned)((fChargeUah * 100 + fullUah / 2) / fullUah);
++	/* the voltage floor keeps a drifting counter from showing a live battery as empty */
++	if (percent == 0 && mv > 3500) {
++		percent = 1;
++	}
++	publish(percent, mv, ma, external, capable, charging, full, true, currentValid);
++#else
+ 	publish(full ? 100 : estimatePercent(mv), mv, ma, external, capable,
+ 	    charging, full, true, currentValid);
++#endif
+ }
+ 
+ void
