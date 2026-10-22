@@ -189,7 +189,8 @@ jobs:
           sdk=$(xcrun --sdk macosx --show-sdk-path)
           python3 t290/eagl/gen_dispatch.py "$sdk" t290/eagl/dispatch_generated.h
           xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
-            -dynamiclib -install_name /usr/lib/t290eagl.dylib -o graphics-out/t290eagl.dylib \
+            -dynamiclib -Wl,-not_for_dyld_shared_cache \
+            -install_name /usr/lib/t290eagl.dylib -o graphics-out/t290eagl.dylib \
             t290/eagl/eaglshim.m -framework Foundation -framework IOKit -framework IOSurface
           xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
             -o graphics-out/eagltest t290/eagl/eagltest.m \
@@ -213,7 +214,8 @@ jobs:
       - name: ES2 and ES3 bridge regressions (fake GPU)
         run: |
           set -euo pipefail
-          clang -O2 -Wall -fobjc-arc -dynamiclib -o host-t290eagl.dylib t290/eagl/eaglshim.m \
+          clang -O2 -Wall -fobjc-arc -dynamiclib -Wl,-not_for_dyld_shared_cache \
+            -o host-t290eagl.dylib t290/eagl/eaglshim.m \
             -framework Foundation -framework IOKit -framework IOSurface
           clang -O2 -Wall -fobjc-arc -o host-eagltest t290/eagl/eagltest.m \
             -framework Foundation -framework IOSurface
