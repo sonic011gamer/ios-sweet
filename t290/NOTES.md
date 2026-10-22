@@ -6,6 +6,12 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- Latest return-to-Android pstore saved ios-t290/logs/elements-usb-return/
+  console.bin: recount.c:414 assertion lhs->rsn_time_mach >= rhs->rsn_time_mach,
+  0 >= 0x24f4072ff, CPU0. Confirms a second zero-time snapshot panic; USB
+  disconnect was followed by Android. Keep content-diagnosis priority, but
+  capture next trace early before this separate stability fault recurs.
+
 - **PRIORITY CHANGED BY USER: restore missing content first, FPS later.**
   Last A8-corrected boot passed ALL real ES2/ES3 pixel tests including white
   glyphs, ASTC, float layers. t290launch injected backboardd; GPU UI active.
