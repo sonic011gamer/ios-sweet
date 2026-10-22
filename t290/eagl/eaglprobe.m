@@ -6,6 +6,7 @@
  */
 #import <Foundation/Foundation.h>
 #include <fcntl.h>
+#include <mach/mach.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdarg.h>
