@@ -1,0 +1,406 @@
+/*
+ * SM-T290 HSUSB/ChipIdea device controller: polled CDC ACM screen/debug link.
+ * Register/PHY reference: Samsung SDM429 Linux, 56a0722be821910353c7e32bdfa8bf95a524a774,
+ * msm8937.dtsi, clock-gcc-8952.c, phy-msm-usb.c and ci13xxx_{udc,msm}.c.
+ * This is board-specific transport code, not Apple's USB device stack.
+ * t290usb=0 disables it; 1 probes only; 2 initializes the device.
+ */
+#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_T290)
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <kern/clock.h>
+#include <kern/thread.h>
+#include <kern/sched_prim.h>
+#include <machine/machine_routines.h>
+#include <pexpert/pexpert.h>
+#include <IOKit/IOLib.h>
+#include <vm/vm_kern.h>
+#include <vm/pmap.h>
+#include "sweet_t290_usb_protocol.h"
+
+extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern uint64_t kvtophys(vm_offset_t);
+extern void FlushPoC_DcacheRegion(vm_offset_t, size_t);
+extern int sweet_t290_rpm_ldo(uint32_t, uint32_t);
+extern uint32_t sweet_t290_screen_copy(void *, uint32_t, uint32_t *);
+extern uint32_t sweet_log_copy(uint64_t *, char *, uint32_t);
+extern uint64_t sweet_log_position(void);
+void sweet_t290_usb_start(void);
+
+#define USB_PA 0x078db000UL
+#define GCC_PA 0x01800000UL
+#define PHY_PA 0x0006c000UL
+#define CMD 0x00
+#define STS 0x04
+#define INTR 0x08
+#define ADDR 0x14
+#define EPLIST 0x18
+#define PORT 0x44
+#define TD_MAX 192
+#define TD_BYTES 16384
+#define ACTIVE 0x80u
+#define TD_ERR 0x68u
+#define TERMINATE 1u
+#define ZLT (1u << 29)
+
+struct usb_td { uint32_t next, token, page[5], pad; };
+struct usb_qh {
+    uint32_t cap, current, next, token, page[5], reserved, setup[2], pad[4];
+};
+_Static_assert(sizeof(struct usb_td) == 32, "dTD size");
+_Static_assert(sizeof(struct usb_qh) == 64, "dQH size");
+struct usb_dma {
+    struct usb_qh qh[32];
+    struct usb_td td[4][TD_MAX] __attribute__((aligned(64)));
+    uint8_t control[512] __attribute__((aligned(64)));
+    uint8_t line[64] __attribute__((aligned(64)));
+    uint8_t command[512] __attribute__((aligned(64)));
+    uint8_t response[64 + T290_USB_MAX_FRAME] __attribute__((aligned(4096)));
+};
+static struct {
+    vm_offset_t core, op, gcc, phy;
+    struct usb_dma *dma;
+    uint32_t pa, mode, setup, prime, flush, status, complete, epctrl;
+    uint32_t sequence, resets, packets, errors, bytes, config, ctrl_out;
+    uint32_t bulk_packet;
+    uint64_t log_pos, sent_at;
+    bool sending, running;
+} u;
+
+static uint32_t rd(vm_offset_t base, uint32_t off)
+{
+    uint32_t v = *(volatile uint32_t *)(base + off);
+    __asm__ volatile("dmb oshld" ::: "memory");
+    return v;
+}
+static void wr(vm_offset_t base, uint32_t off, uint32_t v)
+{
+    *(volatile uint32_t *)(base + off) = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+static void phy_bit(uint32_t off, uint8_t clear, uint8_t set)
+{
+    volatile uint8_t *p = (volatile uint8_t *)(u.phy + off);
+    *p = (*p & ~clear) | set;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+static void cache(void *p, size_t n) { FlushPoC_DcacheRegion((vm_offset_t)p, n); }
+static uint32_t pa(const void *p) { return u.pa + (uint32_t)((uintptr_t)p - (uintptr_t)u.dma); }
+static bool wait_clear(vm_offset_t b, uint32_t off, uint32_t mask, unsigned us)
+{
+    for (unsigned i = 0; i < us; i += 10) {
+        if (!(rd(b, off) & mask)) return true;
+        delay(10);
+    }
+    printf("T290 USB: timeout reg %#x mask %#x value %#x\n", off, mask, rd(b, off));
+    ++u.errors;
+    return false;
+}
+static void sleep_ms(unsigned ms)
+{
+    assert_wait_timeout((event_t)&u, THREAD_UNINT, ms, NSEC_PER_MSEC);
+    thread_block(THREAD_CONTINUE_NULL);
+}
+static bool clock_on(uint32_t off)
+{
+    wr(u.gcc, off, rd(u.gcc, off) | 1);
+    return wait_clear(u.gcc, off, 1u << 31, 10000);
+}
+static bool ulpi_write(uint8_t reg, uint8_t value)
+{
+    wr(u.core, 0x170, (1u << 30) | (1u << 29) | ((uint32_t)reg << 16) | value);
+    return wait_clear(u.core, 0x170, 1u << 30, 10000);
+}
+static uint32_t ep_bit(unsigned slot) { return 1u << ((slot >> 1) + ((slot & 1) ? 16 : 0)); }
+static bool ep_flush(uint32_t mask)
+{
+    wr(u.op, u.flush, mask);
+    return wait_clear(u.op, u.flush, mask, 10000) && wait_clear(u.op, u.status, mask, 10000);
+}
+static void qh_init(unsigned slot, unsigned packet, bool setup)
+{
+    struct usb_qh *q = &u.dma->qh[slot];
+    bzero(q, sizeof(*q));
+    q->cap = (packet << 16) | ZLT | (setup ? 1u << 15 : 0);
+    q->next = TERMINATE;
+    cache(q, sizeof(*q));
+}
+static bool queue(unsigned slot, void *data, uint32_t length)
+{
+    if (slot >= 4 || length > T290_USB_MAX_FRAME + 64) return false;
+    uint32_t count = MAX(1u, (length + TD_BYTES - 1) / TD_BYTES);
+    if (count > TD_MAX || !ep_flush(ep_bit(slot))) return false;
+    struct usb_td *td = u.dma->td[slot];
+    uint32_t left = length, address = length ? pa(data) : 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t n = MIN(left, TD_BYTES);
+        bzero(&td[i], sizeof(td[i]));
+        td[i].next = i + 1 == count ? TERMINATE : pa(&td[i + 1]);
+        td[i].token = (n << 16) | ACTIVE | (i + 1 == count ? 1u << 15 : 0);
+        td[i].page[0] = address;
+        for (unsigned p = 1; p < 5; p++) td[i].page[p] = (address & ~4095u) + p * 4096;
+        address += n;
+        left -= n;
+    }
+    if (length) cache(data, length);
+    cache(td, count * sizeof(*td));
+    struct usb_qh *q = &u.dma->qh[slot];
+    q->current = q->token = 0;
+    q->next = pa(td);
+    cache(q, sizeof(*q));
+    wr(u.op, u.complete, ep_bit(slot));
+    wr(u.op, u.prime, ep_bit(slot));
+    return wait_clear(u.op, u.prime, ep_bit(slot), 10000);
+}
+
+static const uint8_t device_desc[] = {
+    18,1, 0,2, 0xef,2,1,64, T290_USB_VID & 255,T290_USB_VID >> 8,
+    T290_USB_PID & 255,T290_USB_PID >> 8, 0,1, 1,2,3,1
+};
+static const uint8_t config_desc[] = {
+    9,2,75,0,2,1,0,0x80,50,
+    8,11,0,2,2,2,1,0,
+    9,4,0,0,1,2,2,1,0,
+    5,0x24,0,0x10,1, 5,0x24,1,0,1, 4,0x24,2,2, 5,0x24,6,0,1,
+    7,5,0x82,3,16,0,10,
+    9,4,1,0,2,0x0a,0,0,0,
+    7,5,1,2,0,2,0, 7,5,0x81,2,0,2,0
+};
+static const uint8_t qualifier[] = {10,6,0,2,0xef,2,1,64,1,0};
+static const uint8_t line_coding[] = {0,0xc2,1,0,0,0,8};
+static unsigned string_desc(unsigned index)
+{
+    uint8_t *b = u.dma->control;
+    if (!index) { b[0]=4; b[1]=3; b[2]=9; b[3]=4; return 4; }
+    const char *s = index == 1 ? "T290 development" : index == 2 ? "T290 Screen Debug" :
+        index == 3 ? "T290DEBUG" : NULL;
+    if (!s) return 0;
+    unsigned n = (unsigned)strlen(s);
+    b[0] = (uint8_t)(2 + n * 2); b[1] = 3;
+    for (unsigned i = 0; i < n; i++) { b[2+i*2] = s[i]; b[3+i*2] = 0; }
+    return 2 + n * 2;
+}
+static bool high_speed(void) { return ((rd(u.op, PORT) >> 26) & 3) == 2; }
+static void configure(bool on)
+{
+    u.config = on;
+    u.sending = false;
+    ep_flush((1u << 1) | (1u << 17));
+    wr(u.op, u.epctrl + 4, 0);
+    wr(u.op, u.epctrl + 8, 0);
+    if (on) {
+        u.bulk_packet = high_speed() ? 512 : 64;
+        qh_init(2, u.bulk_packet, false);
+        qh_init(3, u.bulk_packet, false);
+        qh_init(5, 16, false);
+        wr(u.op, u.epctrl + 4, (2u << 2) | (1u << 6) | (1u << 7) |
+            (2u << 18) | (1u << 22) | (1u << 23));
+        wr(u.op, u.epctrl + 8, (3u << 18) | (1u << 22) | (1u << 23));
+        queue(2, u.dma->command, sizeof(u.dma->command));
+    }
+    printf("T290 USB: configuration %u, %s-speed\n", u.config, high_speed() ? "high" : "full");
+}
+static void control_reply(unsigned n, unsigned requested)
+{
+    queue(1, u.dma->control, MIN(n, requested));
+    queue(0, NULL, 0);
+}
+static void control_ack(void) { queue(1, NULL, 0); }
+static void control_setup(void)
+{
+    uint8_t s[8];
+    bool stable = false;
+    for (unsigned retry = 0; retry < 16; retry++) {
+        wr(u.op, CMD, rd(u.op, CMD) | (1u << 13));
+        cache(&u.dma->qh[0], sizeof(struct usb_qh));
+        memcpy(s, u.dma->qh[0].setup, sizeof(s));
+        if (rd(u.op, CMD) & (1u << 13)) { stable = true; break; }
+    }
+    wr(u.op, CMD, rd(u.op, CMD) & ~(1u << 13));
+    wr(u.op, u.setup, 1);
+    if (!stable || !ep_flush((1u << 16) | 1)) return;
+    u.ctrl_out = 0;
+    wr(u.op, u.epctrl, (1u << 7) | (1u << 23));
+    unsigned type=s[0], req=s[1], val=s[2] | s[3]<<8, idx=s[4] | s[5]<<8, len=s[6] | s[7]<<8;
+    if (u.packets++ < 24) printf("T290 USB: setup %02x/%02x v%04x i%04x n%u\n",type,req,val,idx,len);
+    uint8_t *b=u.dma->control;
+    if (type == 0x80 && req == 6) {
+        unsigned n=0, kind=val>>8;
+        if (kind == 1) { n=sizeof(device_desc); memcpy(b,device_desc,n); }
+        else if (kind == 2 || kind == 7) {
+            n=sizeof(config_desc); memcpy(b,config_desc,n); b[1]=kind;
+            bool hs=high_speed(); if (kind==7) hs=!hs;
+            b[65]=b[72]=hs ? 0 : 64; b[66]=b[73]=hs ? 2 : 0;
+        } else if (kind == 3) n=string_desc(val&255);
+        else if (kind == 6) { n=sizeof(qualifier); memcpy(b,qualifier,n); }
+        if (n) { control_reply(n,len); return; }
+    } else if (type == 0 && req == 5 && val < 128 && !len) {
+        wr(u.op, ADDR, (val << 25) | (1u << 24)); control_ack(); return;
+    } else if (type == 0 && req == 9 && val <= 1 && !len) {
+        configure(val != 0); control_ack(); return;
+    } else if (type == 0x80 && req == 8) {
+        b[0]=u.config; control_reply(1,len); return;
+    } else if ((type & 0x80) && (type & 0x60)==0 && req==0) {
+        b[0]=b[1]=0; control_reply(2,len); return;
+    } else if (type == 0x81 && req == 10) {
+        b[0]=0; control_reply(1,len); return;
+    } else if (type == 1 && req == 11 && val == 0 && !len) {
+        control_ack(); return;
+    } else if (type == 2 && req == 1 && val == 0 && !len) {
+        unsigned shift = idx&0x80 ? 16 : 0, ep=idx&15;
+        if (ep < 3) {
+            uint32_t off=u.epctrl+ep*4;
+            wr(u.op,off,(rd(u.op,off)&~(1u<<shift)) | (ep ? 1u<<(shift+6) : 0));
+            control_ack(); return;
+        }
+    } else if (type == 0x21 && req == 0x20 && idx == 0 && len == 7) {
+        u.ctrl_out=7; queue(0,u.dma->line,7); return;
+    } else if (type == 0xa1 && req == 0x21 && idx == 0) {
+        memcpy(b,line_coding,7); control_reply(7,len); return;
+    } else if (type == 0x21 && (req == 0x22 || req == 0x23) && idx == 0 && !len) {
+        control_ack(); return;
+    }
+    printf("T290 USB: unsupported setup %02x/%02x\n",type,req);
+    wr(u.op,u.epctrl,rd(u.op,u.epctrl) | (1u<<16) | 1);
+}
+static bool response(unsigned type, uint32_t n, const uint32_t *meta)
+{
+    if (u.sending || n > T290_USB_MAX_FRAME) return false;
+    struct t290_usb_header *h=(void *)u.dma->response;
+    bzero(h,sizeof(*h)); memcpy(h->magic,T290_USB_MAGIC,8);
+    h->version=1; h->type=type; h->sequence=++u.sequence; h->bytes=n;
+    absolutetime_to_nanoseconds(mach_absolute_time(),&h->nanoseconds);
+    if (meta) { h->width=meta[0]; h->height=meta[1]; h->stride=meta[2]; h->shift=meta[3]; h->format=T290_USB_RBG3; }
+    u.sending=queue(3,u.dma->response,(uint32_t)sizeof(*h)+n);
+    u.sent_at=mach_absolute_time(); u.bytes=(uint32_t)sizeof(*h)+n;
+    return u.sending;
+}
+static void command(uint32_t n)
+{
+    uint8_t *out=u.dma->response+sizeof(struct t290_usb_header);
+    uint32_t meta[4];
+    if (!n || u.sending) return;
+    if (u.dma->command[0]=='F') {
+        n=sweet_t290_screen_copy(out,T290_USB_MAX_FRAME,meta);
+        if (n) { response(T290_USB_FRAME,n,meta); return; }
+        n=snprintf((char *)out,256,"framebuffer not ready\n");
+        response(T290_USB_ERROR,n,NULL);
+    } else if (u.dma->command[0]=='L') {
+        n=sweet_log_copy(&u.log_pos,(char *)out,65536);
+        response(T290_USB_LOG,n,NULL);
+    } else {
+        n=snprintf((char *)out,256,"T290 USB screen v1 config=%u speed=%s resets=%u errors=%u\n",
+            u.config,high_speed()?"high":"full",u.resets,u.errors);
+        response(T290_USB_INFO,n,NULL);
+    }
+}
+static void bus_reset(void)
+{
+    ++u.resets; u.config=0; u.sending=false; u.ctrl_out=0;
+    ep_flush(0xffffffff);
+    wr(u.op,ADDR,0); wr(u.op,u.setup,0xffff); wr(u.op,u.complete,0xffffffff);
+    wr(u.op,u.epctrl+4,0); wr(u.op,u.epctrl+8,0);
+    qh_init(0,64,true); qh_init(1,64,false);
+    wr(u.op,u.epctrl,(1u<<7) | (1u<<23));
+    printf("T290 USB: bus reset %u port %#x mode %#x\n",u.resets,rd(u.op,PORT),rd(u.op,u.mode));
+}
+static void usb_thread(void *arg __unused, wait_result_t wr_unused __unused)
+{
+    for (;;) {
+        uint32_t st=rd(u.op,STS); wr(u.op,STS,st);
+        if (st & (1u<<6)) bus_reset();
+        if (rd(u.op,u.setup)&1) control_setup();
+        uint32_t done=rd(u.op,u.complete); wr(u.op,u.complete,done);
+        if ((done&1) && u.ctrl_out) { u.ctrl_out=0; control_ack(); }
+        if (done&(1u<<17)) {
+            cache(u.dma->td[3],TD_MAX*sizeof(struct usb_td));
+            for (unsigned i=0;i<TD_MAX;i++) {
+                if (u.dma->td[3][i].token&TD_ERR) { ++u.errors; printf("T290 USB: IN DMA error %#x\n",u.dma->td[3][i].token); break; }
+                if (u.dma->td[3][i].next&TERMINATE) break;
+            }
+            u.sending=false;
+        }
+        if ((done&(1u<<1)) && u.config) {
+            cache(&u.dma->td[2][0],sizeof(struct usb_td));
+            cache(u.dma->command,sizeof(u.dma->command));
+            uint32_t token=u.dma->td[2][0].token;
+            if (!(token&(ACTIVE|TD_ERR))) command(512-((token>>16)&0x7fff));
+            queue(2,u.dma->command,sizeof(u.dma->command));
+        }
+        if (u.sending) {
+            uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time()-u.sent_at,&ns);
+            if (ns>10000000000ULL) { ep_flush(1u<<17); u.sending=false; ++u.errors; printf("T290 USB: host IN timeout\n"); }
+        }
+        sleep_ms(1);
+    }
+}
+static void usb_init(int enable)
+{
+    u.gcc=ml_io_map(GCC_PA,0x80000); u.phy=ml_io_map(PHY_PA,4096);
+    if (!u.gcc || !u.phy) return;
+    printf("T290 USB: GCC SYS %#x AHB %#x PHY %#x sleep %#x source %#x/%#x\n",
+        rd(u.gcc,0x41004),rd(u.gcc,0x41008),rd(u.gcc,0x41030),rd(u.gcc,0x4102c),rd(u.gcc,0x41010),rd(u.gcc,0x41014));
+    if (enable<2) return;
+    /* Android's 78db000.usb consumers: hsusb_vdd_dig = pm8953 L23 0.8 V (shared
+     * with the DSI vdda, already on), HSUSB_1p8 = L7 1.8 V, HSUSB_3p3 = L13 3.05 V */
+    int a=sweet_t290_rpm_ldo(23,800000),b=sweet_t290_rpm_ldo(7,1800000),c=sweet_t290_rpm_ldo(13,3050000);
+    printf("T290 USB: rails L23/L7/L13 %d/%d/%d\n",a,b,c);
+    if (a || b || c) return;
+    wr(u.gcc,0x41014,0x10b); wr(u.gcc,0x41010,rd(u.gcc,0x41010)|1);
+    if (!wait_clear(u.gcc,0x41010,1,10000) || !clock_on(0x41004) || !clock_on(0x41008) ||
+        !clock_on(0x41030) || !clock_on(0x4102c)) return;
+    u.core=ml_io_map(USB_PA,4096); if (!u.core) return;
+    wr(u.gcc,0x41000,1); wr(u.gcc,0x4103c,1); delay(10);
+    wr(u.gcc,0x4103c,0); delay(1000); wr(u.gcc,0x41000,0); delay(10);
+    if (!clock_on(0x41004) || !clock_on(0x41008)) return;
+    wr(u.core,0x184,0x80000000); wr(u.core,0x140,2);
+    if (!wait_clear(u.core,0x140,2,250000)) return;
+    wr(u.core,0x184,0x80000000); wr(u.core,0x90,0); wr(u.core,0x98,8);
+    wr(u.gcc,0x41034,1); phy_bit(0x78,4,0); delay(10); wr(u.gcc,0x41034,0); delay(100);
+    phy_bit(0x8c,0,2); phy_bit(0x94,0,4);
+    /* The running Android FDT's Femto tuning is documented in USB.md.
+     * Keep LK's retained tuning; only restore PHY power/reset and the
+     * same manual D+ / session-valid override used by ci13xxx_msm. */
+    if (!ulpi_write(0x97,3)) return;
+    wr(u.core,0xa0,rd(u.core,0xa0)|(1u<<7));
+    wr(u.core,0x140,rd(u.core,0x140)|(1u<<25));
+    wr(u.core,0x9c,rd(u.core,0x9c)|(1u<<13));
+    unsigned cap=rd(u.core,0x100)&255, eps=rd(u.core,0x124)&31;
+    bool lpm=(rd(u.core,0x108)&(1u<<17))!=0;
+    printf("T290 USB: id %#x cap %u eps %u lpm %u port %#x\n",rd(u.core,0),cap,eps,lpm,rd(u.core,0x184));
+    if (cap<0x10 || cap>0x80 || eps<3 || eps>16) return;
+    u.op=u.core+0x100+cap;
+    u.mode=lpm?0xc8:0x68; u.setup=lpm?0xd8:0x6c; u.prime=lpm?0xdc:0x70;
+    u.flush=lpm?0xe0:0x74; u.status=lpm?0xe4:0x78; u.complete=lpm?0xe8:0x7c; u.epctrl=lpm?0xec:0x80;
+    vm_offset_t dma=0; vm_size_t size=round_page(sizeof(struct usb_dma));
+    if (kmem_alloc_contig(kernel_map,&dma,size,PAGE_MASK,0,0,KMA_DATA|KMA_ZERO|KMA_PERMANENT,
+        VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) return;
+    uint64_t phys=kvtophys(dma);
+    if (!phys || phys+size>0x100000000ULL || (phys&2047)) return;
+    u.dma=(void *)dma; u.pa=(uint32_t)phys;
+    wr(u.op,CMD,rd(u.op,CMD)&~1u); wr(u.op,INTR,0);
+    wr(u.op,u.mode,0); wr(u.op,u.mode,2|(1u<<3)|(1u<<4));
+    if ((rd(u.op,u.mode)&3)!=2) { printf("T290 USB: cannot enter device mode\n"); return; }
+    cache(u.dma,sizeof(*u.dma));
+    wr(u.op,EPLIST,pa(u.dma->qh)); bus_reset();
+    u.log_pos=sweet_log_position(); if (u.log_pos>65536) u.log_pos-=65536; else u.log_pos=0;
+    wr(u.op,CMD,(rd(u.op,CMD)&~(0xffu<<16))|1);
+    u.running=true;
+    printf("T290 USB: CDC ready VID %04x PID %04x DMA %#x (%lu bytes)\n",T290_USB_VID,T290_USB_PID,u.pa,(unsigned long)size);
+}
+/* Bring-up and polling run in their own thread: the root mount does not wait for USB. */
+static void usb_main(void *arg, wait_result_t wr_unused __unused)
+{
+    usb_init((int)(intptr_t)arg);
+    if (u.running) usb_thread(NULL, THREAD_AWAKENED);
+    printf("T290 USB: not running\n");
+}
+void sweet_t290_usb_start(void)
+{
+    int enable=0;
+    PE_parse_boot_argn("t290usb",&enable,sizeof(enable));
+    if (!enable) return;
+    thread_t thread;
+    if (kernel_thread_start(usb_main,(void *)(intptr_t)enable,&thread)==KERN_SUCCESS) thread_deallocate(thread);
+}
+#endif
