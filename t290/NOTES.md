@@ -6,6 +6,13 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- BGRA mip fix committed **25b21dd**; new CI **39796561147** reuses kernel
+  from 39794145243. Keep 39794145243 until new kernel artifact reuploaded,
+  then delete predecessor. Do not flash recovery: installed 0135 is enough.
+  Next download final bridge/test after CI; preserve old SD transfer result
+  (already read), stage new bridge/test with backup/log GETs and full raw
+  request readback, manual boot, inspect eagltest exit and real GPU pixels.
+
 - **0135 ACTUAL BOOT: CPU fallback confirmed.** User returned to Android;
   raw pstore saved ios-t290/logs/boot0135-sensors. SD update done 4/4.
   Real FD504 ES2 passed clear/triangle, IOSurface aliases/rows, LA08,

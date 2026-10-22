@@ -1,10 +1,11 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 **Active SM-T290 work (2026-10-22):** see `t290/NOTES.md` and `t290/GPU.md`.
-Mesa ES2/ES3 GPU pixel tests pass. Kernel 0133 is installed, GPU 400 MHz,
-no padded EAGL copies; latest bridge reports 24.6-46 rendered-frame flushes/s.
-Icons/text/keyboard and some apps still render incorrectly. Kernel 0135 and
-additional texture/blending tests are being prepared; see active t290 handoff.
+Recovery 0135 installed and partition readback verified. Real boot consumed
+new bridge/test SD request, but BGRA pixel regression failed (exit 51),
+so t290launch ran backboardd with the system renderer (CPU fallback).
+Fix 25b21dd tracks upload format/type in mip compatibility; CI 39796561147
+pending. Real-device validation still required. No recovery reflash needed.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
