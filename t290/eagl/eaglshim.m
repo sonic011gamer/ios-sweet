@@ -157,6 +157,7 @@ static const struct { const void *replacement, *original; } surface_interpose[] 
     BOOL _gpuWork;
     uint32_t _errors;
     NSMutableDictionary<NSNumber *, T290SurfaceImage *> *_framebuffers;
+    NSMutableDictionary<NSNumber *, NSNumber *> *_attachmentNames;
     uint64_t _waitTicks;
     unsigned _waitCount, _flushCount, _drawCount;
     struct { void *renderer; void *dispatch[1100]; } _macro;
@@ -289,6 +290,7 @@ static void t290_framebuffer_texture(GLenum target, GLenum attachment, GLenum te
     GLFN("glFramebufferTexture2D", void, (GLenum, GLenum, GLenum, GLuint, GLint))(target, attachment, textarget, name, level);
     T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
     if (target != 0x8ca8 && attachment == 0x8ce0) {
+        ctx->_attachmentNames[@(ctx->_drawFbo)] = @(name);
         T290SurfaceImage *img = ctx.sharegroup.textures[@(name)];
         if (img) ctx->_framebuffers[@(ctx->_drawFbo)] = img;
         else [ctx->_framebuffers removeObjectForKey:@(ctx->_drawFbo)];
@@ -299,6 +301,7 @@ static void t290_framebuffer_renderbuffer(GLenum target, GLenum attachment, GLen
     GLFN("glFramebufferRenderbuffer", void, (GLenum, GLenum, GLenum, GLuint))(target, attachment, rbtarget, name);
     T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
     if (target != 0x8ca8 && attachment == 0x8ce0) {
+        ctx->_attachmentNames[@(ctx->_drawFbo)] = @(0x100000000ull | name);
         T290SurfaceImage *img = ctx.sharegroup.renderbuffers[@(name)];
         if (img) ctx->_framebuffers[@(ctx->_drawFbo)] = img;
         else [ctx->_framebuffers removeObjectForKey:@(ctx->_drawFbo)];
@@ -309,6 +312,7 @@ static void t290_delete_framebuffers(GLsizei n, const GLuint *names)
     T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
     for (GLsizei i = 0; i < n; i++) {
         [ctx->_framebuffers removeObjectForKey:@(names[i])];
+        [ctx->_attachmentNames removeObjectForKey:@(names[i])];
         if (ctx->_drawFbo == names[i]) ctx->_drawFbo = 0;
     }
     GLFN("glDeleteFramebuffers", void, (GLsizei, const GLuint *))(n, names);
@@ -327,7 +331,12 @@ static void t290_texture_write(BOOL redefine)
     ctx->_gpuWork = YES;
     GLint name = 0;
     GLFN("glGetIntegerv", void, (GLenum, GLint *))(0x8069, &name);
-    if (redefine) [ctx.sharegroup.textures removeObjectForKey:@(name)];
+    if (redefine) {
+        [ctx.sharegroup.textures removeObjectForKey:@(name)];
+        for (NSNumber *fbo in ctx->_attachmentNames)
+            if ([ctx->_attachmentNames[fbo] unsignedLongLongValue] == (GLuint)name)
+                [ctx->_framebuffers removeObjectForKey:fbo];
+    }
     else {
         T290SurfaceImage *img = ctx.sharegroup.textures[@(name)];
         if (img) img->gpuDirty = YES;
@@ -408,6 +417,7 @@ static uintptr_t unsupported_private(void *ctx, ...)
     }
     _sharegroup = group;
     _framebuffers = [NSMutableDictionary dictionary];
+    _attachmentNames = [NSMutableDictionary dictionary];
     _API = api;
     _mesa = mesa_create(api, group.root);
     if (!_mesa) return nil;
@@ -521,6 +531,10 @@ static uintptr_t unsupported_private(void *ctx, ...)
     if (bind) bind(target, mirror->image);
     if (bind) {
         images[@(name)] = mirror;
+        uint64_t attachmentName = (uint64_t)(GLuint)name | (target == 0x8d41 ? 0x100000000ull : 0);
+        for (NSNumber *fbo in _attachmentNames)
+            if ([_attachmentNames[fbo] unsignedLongLongValue] == attachmentName)
+                _framebuffers[fbo] = mirror;
     }
     static unsigned count;
     if (count++ < 12) plog("t290eagl: imported surface %u %dx%d target %#x invert %d",

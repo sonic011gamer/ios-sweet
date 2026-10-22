@@ -33,6 +33,10 @@
 - Added throttled GL error diagnostics (pending errors preserved for callers)
   and wait-time/flush/draw counters for the next actual compositor run.
   Hardware performance/correctness of these changes is still pending.
+- CI39744412227 failed before compilation: parsed SDK return types retained
+  trailing whitespace (`void `). Fix178794f normalizes them, which also
+  makes diagnostic hooks reachable after void calls. Framebuffer attachment
+  tracking now follows image storage replacement after an FBO was attached.
 
 ### Previous bridge5 preparation
 
