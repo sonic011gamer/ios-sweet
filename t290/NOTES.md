@@ -50,6 +50,22 @@
 - Initial commit a0cd21f pushed; XNU CI 39780060304 and EAGL 39780057223
   queued at the last check (GitHub macOS runners). Kernel source is locally
   syntax-checked; real GPU format/blend tests need the next tablet boot.
+- Latest committed state: eec9482 adds the remaining draw/texture hooks;
+  **EAGL 39780670625 PASS**, all three jobs including iOS build and mac fake
+  ES2/ES3 format/blend command tests (no GPU pixels verified by fake mode).
+  30c8e21 adds the fade fix (local framebuffer compile PASS again, 0/1).
+  e022a51 adds partial mip-chain handling and its sampling regression test.
+- **Final builds pending macOS runners:** XNU 39781091148 (30c8e21), EAGL
+  39781544025 (e022a51), both still queued at last check. Earlier kernel
+  39780060304 and obsolete EAGL 39780057223 were cancelled/superseded.
+  No final 0135 artifact downloaded, staged or flashed yet. No device test
+  of these fixes, and no new measured FPS gain yet.
+- Image packing preflight PASS: `dl/k-t290-0135/roundtrip.img` is byte-for-byte
+  identical to installed recovery 0133, SHA256 51d3531b...aa1eb9ee. Use the
+  existing `dl/eagl-k0130/repack.py` with that 0133 image and the final CI
+  kernel. Preserve its shim, ADT, boot args and Samsung footer. The post-0134
+  framebuffer source for regeneration is also saved at
+  `dl/k-t290-0135/SweetFramebuffer.before.cpp` (ignored local artifact).
 - Next: commit/build 0135 and the bridge/tests through CI, prepare a checked
   recovery image and SD request. A new recovery write requires user approval
   under AGENTS.md; no new approval has been requested or received yet.
