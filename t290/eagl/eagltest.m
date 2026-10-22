@@ -60,11 +60,56 @@ int main(void)
             /* SWEET_FAKE validates command generation only; no pixels execute. */
             if (!getenv("SWEET_FAKE") &&
                 (abs(pixel[0] - 191) > 1 || abs(pixel[1] - 128) > 1 || abs(pixel[2] - 64) > 1 || pixel[3] != 255)) return 7;
+            const char *sources[] = {
+                "attribute vec2 position; void main(){gl_Position=vec4(position,0.0,1.0);}",
+                "precision mediump float; void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}"
+            };
+            GLuint shaders[2];
+            for (unsigned j = 0; j < 2; j++) {
+                shaders[j] = CALL(594, GLuint, (void *, GLenum), j ? 0x8b30 : 0x8b31);
+                CALL(595, void, (void *, GLuint, GLsizei, const char *const *, const GLint *), shaders[j], 1, &sources[j], NULL);
+                CALL(596, void, (void *, GLuint), shaders[j]);
+                GLint ok = 0;
+                CALL(622, void, (void *, GLuint, GLenum, GLint *), shaders[j], 0x8b81, &ok);
+                if (!ok) {
+                    char log[1024] = {0};
+                    CALL(623, void, (void *, GLuint, GLsizei, GLsizei *, char *), shaders[j], sizeof(log), NULL, log);
+                    fprintf(stderr, "FAIL shader %u: %s\n", j, log);
+                    return 8;
+                }
+            }
+            GLuint program = CALL(597, GLuint, (void *));
+            for (unsigned j = 0; j < 2; j++) CALL(598, void, (void *, GLuint, GLuint), program, shaders[j]);
+            CALL(630, void, (void *, GLuint, GLuint, const char *), program, 0, "position");
+            CALL(599, void, (void *, GLuint), program);
+            GLint linked = 0;
+            CALL(622, void, (void *, GLuint, GLenum, GLint *), program, 0x8b82, &linked);
+            if (!linked) return 9;
+            CALL(600, void, (void *, GLuint), program);
+            GLuint vbo = 0;
+            const GLfloat vertices[] = {-1,-1, 1,-1, 0,1};
+            CALL(644, void, (void *, GLsizei, GLuint *), 1, &vbo);
+            CALL(642, void, (void *, GLenum, GLuint), 0x8892, vbo);
+            CALL(646, void, (void *, GLenum, GLsizeiptr, const void *, GLenum), 0x8892, sizeof(vertices), vertices, 0x88e4);
+            CALL(511, void, (void *, GLuint, GLint, GLenum, GLboolean, GLsizei, const void *), 0, 2, 0x1406, 0, 0, NULL);
+            CALL(512, void, (void *, GLuint), 0);
+            CALL(335, void, (void *, GLint, GLint, GLsizei, GLsizei), 0, 0, 64, 64);
+            CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
+            CALL(89, void, (void *));
+            err = CALL(102, GLenum, (void *));
+            pixel += 32 * 256 + 32 * 4;
+            printf("triangle GL error %#x, centre BGRA %u,%u,%u,%u\n", err, pixel[0], pixel[1], pixel[2], pixel[3]);
+            if (err) return 10;
+            if (!getenv("SWEET_FAKE") && (pixel[0] || pixel[1] || pixel[2] != 255 || pixel[3] != 255)) return 11;
+            CALL(643, void, (void *, GLsizei, const GLuint *), 1, &vbo);
+            CALL(600, void, (void *, GLuint), 0);
+            CALL(591, void, (void *, GLuint), program);
+            for (unsigned j = 0; j < 2; j++) CALL(591, void, (void *, GLuint), shaders[j]);
             CALL(673, void, (void *, GLsizei, const GLuint *), 1, &fbo);
             CALL(59, void, (void *, GLsizei, const GLuint *), 1, &tex);
             CFRelease(surf);
         }
-        printf("PASS EAGL ES2/ES3, GLI dispatch, IOSurface framebuffer%s\n",
+        printf("PASS EAGL ES2/ES3, GLI dispatch, IOSurface framebuffer and shaders%s\n",
             getenv("SWEET_FAKE") ? " (fake GPU; pixels not verified)" : " and GPU pixels");
     }
     return 0;

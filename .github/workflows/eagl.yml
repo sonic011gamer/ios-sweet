@@ -50,3 +50,24 @@ jobs:
         with:
           name: t290eagl
           path: out
+
+  mac-smoke:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mesa EAGL smoke test (fake GPU)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run=$(gh run list --workflow mesa-ios.yml --branch t290 --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          gh run download "$run" -n mesa-mac -D mesa-mac
+          lib=$(find "$PWD/mesa-mac" -name libOSMesa.8.dylib -print -quit)
+          test -n "$lib"
+          python3 t290/eagl/gen_dispatch.py "$(xcrun --sdk macosx --show-sdk-path)" t290/eagl/dispatch_generated.h
+          clang -O2 -Wall -fobjc-arc -dynamiclib -o t290eagl.dylib t290/eagl/eaglshim.m \
+            -framework Foundation -framework IOKit -framework IOSurface
+          clang -O2 -Wall -fobjc-arc -o eagltest t290/eagl/eagltest.m -framework Foundation -framework IOSurface
+          codesign -s - -f t290eagl.dylib eagltest
+          export T290_MESA_LIB="$lib" SWEET_FAKE=1 DYLD_INSERT_LIBRARIES="$PWD/t290eagl.dylib"
+          perl -e 'alarm 120; exec @ARGV' ./eagltest
