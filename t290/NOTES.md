@@ -33,17 +33,23 @@
   sufficient for the compositor; no further shim-only reboot is useful.
 - Kernel fix 0c84f68 / patch 0130 returns kIOReturnUnsupported for selector
   6 instead of a bogus success. **Kernel CI 39738089026 PASSED**,
-  SWEET_BOARD=t290; artifact download pending. No partitions flashed.
+  SWEET_BOARD=t290. Kernel downloaded and SHA256 matches the CI manifest:
+  c0cca894f3347ef0452317e44d09241ea25fc819ff8bece549259400bd87d387.
 - Current recovery backed up and SHA-verified on device and PC at
   `ios-t290/backup-20261022-gpu/recovery-before-0130.img`, SHA256
   dba7a21a196c3fe04a0ed432c29bb32dacabb0bfdecf0e823fe4dffbbf7b00cf.
   `dl/eagl-k0130/repack.py` replaces only the XNU payload, preserving shim,
   appended DTB, ADT, boot args and opaque Samsung/AVB metadata. The unchanged
   payload packing round trip is byte-identical to the backup.
-- Next: finish the kernel download, build/verify recovery-0130.img, push
-  the file to Android and verify its SHA256. Then request permission to
-  write recovery as required by AGENTS.md. Installation is NOT authorized
-  yet. Existing launchd guard and bridge4 can test kernel 0130 unchanged.
+- **Ready for approval:** `dl/eagl-k0130/recovery-0130.img` (64 MiB), SHA256
+  144be875b8fca287c46e45e2fcd622255709b2f4deb341a7923023454cb50dc4.
+  Preserved shim/DTB, ADT, boot args and opaque AVB metadata; unpack/check
+  passed. Pushed to `/data/local/tmp/recovery-0130.img`; device SHA matches.
+  Recovery is still the backed-up dba7a21a... image; partition size 67108864.
+- Next: get explicit permission to write `/dev/block/by-name/recovery` as
+  required by AGENTS.md, then write the prepared image and compare the full
+  partition SHA256. Installation is NOT authorized yet. Existing launchd
+  guard and bridge4 can test kernel 0130 unchanged after the write.
 - `t290-xfer.ps1` now checks every adb exit code and refuses to use stale
   local transfer headers after connection errors. Tested normal result
   reading and an injected native-command failure (exit 7); both pass.
