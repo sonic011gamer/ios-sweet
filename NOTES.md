@@ -56,12 +56,31 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
   enables the distributor/interface with plain writel(1) — a single-group GIC,
   so the missing Group-1 writes are not the issue. Our ADT's 27 = the QEMU
   virt value.
-- **`out-vt20.img` awaits device test** (repo root): `out-psci.img` (cpus=4,
-  sweetpsci=hvc) with the ADT's `virtual-timer-intid` u32 patched 27 → 20 in
-  place; mkadt_t290.py fixed for future regenerations (commit 451e41e).
-  Expect: past the CPU lines → `SWEET SDHC:` prints (RPM SMD open, L11/L12,
-  card ID, `sdroot0 …`) → `BSD root: sdroot0, major …`. If still silent, dump
-  the plog block 0xd9c00000 (Android-side, `oem ramoops raw`) for more.
+- **`out-vt20.img` verdict (2026-10-23, tested): vtimer INTID 20 was the blocker.**
+  With `cpus=4 sweetpsci=hvc` the whole CPU/SMP stage passes and the boot runs
+  through Skywalk self-tests, ifnet_attach, dlil_init (kernel threads now get
+  scheduled = timer works) up to the SD-card bring-up, which fails:
+  `SWEET SDHC: smem items 18/342 in unknown area 0xfc428000` →
+  `rpm_requests channel not found` → `no microSD card: 6` →
+  panic `IOFindBSDRoot: SWEET microSD root sdroot0 unavailable: 6 @IOKitBSDInit.cpp:808`
+  (non-fatal here; the kernel kept printing the following init). Items 18/342 =
+  `SMEM_SMD_BASE+4`/`SMEM_SMD_FIFO+4` for the `rpm_requests` channel (cid 4,
+  found in alloc item 13, name+ctype 0x0f match ✓): its port_info/FIFO live in
+  the **msm8994 RPM message RAM at 0xfc428000**; the driver only accepted the
+  placeholder `RPM_MSG_PHYS 0x06800000`.
+- LK cross-check (user checkout /home/snaccy/Lumia950/lk2nd): alloc-table layout,
+  smd entry struct (name@0 cid@+20 ctype@+24), `SMEM_SMD_BASE_ID=14`,
+  `SMEM_SMD_FIFO_BASE_ID=338` and the handshake all match sweet_sdhc.c; RPM
+  doorbell `writel(BIT(0), APCS_ALIAS0_IPC_INTERRUPT)` = `KPSS_BASE(0xF9000000)
+  + 0xD008` = driver's `sd.ipc + 8` ✓. The ONLY wrong constant was RPM_MSG_PHYS.
+- **Fix READY for CI (commit 55a9471)**: 0113-t290-sdhc-root.patch changed in
+  place (RPM_MSG_PHYS → 0xFC428000UL, comment cites aux base 0xfc428000/0x4000);
+  same edit applied in /tmp/opencode/xnu-verify. No other changes in the commit.
+  Next: push → GitHub Actions xnu build → mkpayload + shim rebuild → boot with
+  the same cmdline (vtimer 20 ADT stays: regenerate with mkadt_t290.py or reuse
+  the ADT already in out-vt20.img).
+- NOTE: `tools/mkadt.py` has unrelated uncommitted working-tree changes
+  (−245 lines, pre-existing) — left untouched; user to review/commit or discard.
 
 - Clean xnu workspace for the repo patchset: `/tmp/opencode/xnu-verify` reset to
   1b191cb (xnu-8796.141.3); all 57 `xnu/patches/*.patch` apply cleanly; stage
