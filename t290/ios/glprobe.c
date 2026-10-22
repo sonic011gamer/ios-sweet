@@ -99,18 +99,32 @@ watchdog(void *arg)
 		thread_basic_info_data_t bi;
 		mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
 		thread_info(main_thread, THREAD_BASIC_INFO, (thread_info_t)&bi, &n);
+#if defined(__aarch64__)
 		arm_thread_state64_t st;
 		n = ARM_THREAD_STATE64_COUNT;
+		const int flavor = ARM_THREAD_STATE64;
+#elif defined(__x86_64__)
+		x86_thread_state64_t st;
+		n = x86_THREAD_STATE64_COUNT;
+		const int flavor = x86_THREAD_STATE64;
+#else
+#error Unsupported watchdog architecture
+#endif
 		/* thread_get_state waits for a thread in an uninterruptible wait */
 		kern_return_t kr = bi.run_state == TH_STATE_UNINTERRUPTIBLE ? KERN_ABORTED :
-		    thread_get_state(main_thread, ARM_THREAD_STATE64, (thread_state_t)&st, &n);
+		    thread_get_state(main_thread, flavor, (thread_state_t)&st, &n);
 		mark("glprobe: sample %d step '%s': run_state %d flags %#x cpu %d user %d.%06d sys %d.%06d kr %#x",
 		    k, step, bi.run_state, bi.flags, bi.cpu_usage, bi.user_time.seconds,
 		    bi.user_time.microseconds, bi.system_time.seconds, bi.system_time.microseconds, kr);
 		if (!kr) {
+#if defined(__aarch64__)
 			where("pc", arm_thread_state64_get_pc(st));
 			where("lr", arm_thread_state64_get_lr(st));
 			uint64_t *fp = (uint64_t *)(uintptr_t)arm_thread_state64_get_fp(st);
+#else
+			where("pc", st.__rip);
+			uint64_t *fp = (uint64_t *)(uintptr_t)st.__rbp;
+#endif
 			for (int d = 0; d < 6 && fp && ((uintptr_t)fp & 7) == 0; d++) {
 				where("fr", fp[1]);
 				if ((uint64_t *)(uintptr_t)fp[0] <= fp)
