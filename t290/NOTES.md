@@ -4,6 +4,29 @@
 (XNU + неизменённый userland iOS 16 на Redmi Note 10 Pro). Локальная копия:
 `D:\test1\ios-sweet`, его `NOTES.md` — подробный журнал того, как это делалось.
 
+## Active handoff 2026-10-22 (later): USB CDC screen/debug link, kernel 0131
+
+- Patch 0131 (`t290/usb`, commit with "xnu 0131"): HSUSB/ChipIdea device
+  mode as CDC ACM (VID 1209 PID 0001, "T290 Screen Debug"), commands F/L/I
+  return panel pixels, kernel log, info; PC side `t290/usb/viewer.py`
+  (Windows usbser, tkinter + Pillow; unit test passes).
+- Fixed vs the uncommitted draft: USB PHY rails verified on Android
+  (`/sys/class/regulator`): hsusb_vdd_dig = **L23 0.8 V** (shared with DSI
+  vdda), HSUSB_1p8 = L7 1.8 V, HSUSB_3p3 = L13 3.05 V. The draft used L2
+  1.2 V (disabled, no consumers on Android). Init now runs in its own kernel
+  thread so the root mount never waits for USB.
+- Kernel CI 39749834055 PASSED. Image `dl/k-t290usb1/t290-ios.img`
+  (mkboot NATIVE=1, -DT290_GPU2, EXTRA="t290usb=2"; boot args otherwise equal
+  to recovery 0130), SHA256 953ba242a5e9ac695c905937986c4de0ed99e8bd24d16af12aecf826bb9bd4e0.
+- User approved ("Да, записать recovery 0131 с USB"). Backup of 0130 first:
+  `ios-t290/backup-20261022-usb/recovery-before-0131.img` (144be875...).
+  **INSTALLED** and full-partition readback verified (953ba242...). Writes to
+  mmcblk0p57 sometimes fail with a transient "Permission denied"; retry.
+- Bridge6 SD request (below) is still pending and unaffected.
+- **Next:** user boots iPadOS with the USB cable on the PC; check that
+  Windows enumerates VID_1209&PID_0001 (COM port), run viewer.py; if not,
+  read pstore lines "T290 USB:" (rails, id/cap, bus reset, setup).
+
 ## Active handoff 2026-10-22: EAGL bridge
 
 ### Latest result: bridge5 real tests PASS, GUI still slow/incomplete
