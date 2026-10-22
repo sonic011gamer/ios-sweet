@@ -40,6 +40,12 @@
   compressed texture replacements/updates participate in IOSurface tracking
   and GL error checks. Previously these could bypass the presentation wait
   or retain stale image metadata after replacing texture storage.
+- Fixed another texture completeness bug: defining mip level 1 restored
+  MAX_LEVEL=1000, so a partial chain (e.g. 4x4 + 2x2 but no 1x1) sampled
+  black. Track each defined level's format/dimensions and clamp to the
+  contiguous matching chain; generated complete chains retain their normal
+  range. Guard adds partial-chain sampling and reuse across pixel formats.
+  Whether CA's missing UI takes this path still needs a hardware capture.
   CI/device results for these new changes are pending; no FPS gain claimed.
 - Initial commit a0cd21f pushed; XNU CI 39780060304 and EAGL 39780057223
   queued at the last check (GitHub macOS runners). Kernel source is locally

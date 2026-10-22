@@ -210,7 +210,8 @@ static inline void image_mark(T290SurfaceImage *img, size_t y0, size_t y1)
 @property(nonatomic, strong) NSMapTable<NSString *, T290SurfaceImage *> *surfaces;
 @property(nonatomic, strong) NSMutableSet<T290SurfaceImage *> *dirty;   /* padded, GPU-written */
 @property(nonatomic, weak) T290SurfaceImage *display;                  /* surface 1 (scanout) */
-@property(nonatomic, strong) NSMutableIndexSet *mipmapped;             /* textures with levels > 0 */
+@property(nonatomic, strong) NSMutableIndexSet *mipmapped;             /* generated complete chains */
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary *> *mipLevels;
 @end
 @implementation T290Sharegroup
 - (void)dealloc { if (_root) mesa_destroy(_root); }
@@ -607,6 +608,7 @@ static void t290_delete_textures(GLsizei n, const GLuint *names)
     for (GLsizei i = 0; i < n; i++) {
         [ctx.sharegroup.textures removeObjectForKey:@(names[i])];
         [ctx.sharegroup.mipmapped removeIndex:names[i]];
+        [ctx.sharegroup.mipLevels removeObjectForKey:@(names[i])];
     }
     forget_images(ctx, gone);
     gl.DeleteTextures(n, names);
@@ -645,19 +647,35 @@ static void set_max_level(T290Context *ctx, GLenum target, GLint level)
     gl.TexParameteri(target, 0x813d, level);
     gl.GetError();
 }
-static void tex_level_defined(GLenum target, GLint level)
+static void tex_level_defined(GLenum target, GLint level, GLenum internal, GLsizei w, GLsizei h)
 {
-    if (target != 0x0de1) return;
+    if (target != 0x0de1 || level < 0 || level > 31 || w <= 0 || h <= 0) return;
     T290Context *ctx = current_ctx();
     GLint name = 0;
     gl.GetIntegerv(0x8069, &name);
-    if (level > 0) {
-        if (![ctx.sharegroup.mipmapped containsIndex:name]) {
-            [ctx.sharegroup.mipmapped addIndex:name];
-            set_max_level(ctx, target, 1000);
-        }
+    NSMutableDictionary *levels = ctx.sharegroup.mipLevels[@(name)];
+    if (!levels) ctx.sharegroup.mipLevels[@(name)] = levels = [NSMutableDictionary dictionary];
+    NSArray *definition = @[@(internal), @(w), @(h)];
+    if (!level && ![levels[@0] isEqual:definition]) [ctx.sharegroup.mipmapped removeIndex:name];
+    levels[@(level)] = definition;
+    if ([ctx.sharegroup.mipmapped containsIndex:name]) return;
+    NSArray *base = levels[@0];
+    if (!base) return;
+    GLenum format = [base[0] unsignedIntValue];
+    GLsizei width = [base[1] intValue], height = [base[2] intValue];
+    GLint last = 0;
+    /* CA can supply a partial mip chain. Restoring MAX_LEVEL=1000 as
+     * soon as level 1 arrived made a missing final level turn the whole
+     * texture black. Expose only contiguous levels of matching geometry. */
+    while (width > 1 || height > 1) {
+        width = MAX(1, width / 2);
+        height = MAX(1, height / 2);
+        NSArray *next = levels[@(last + 1)];
+        if (!next || [next[0] unsignedIntValue] != format ||
+            [next[1] intValue] != width || [next[2] intValue] != height) break;
+        last++;
     }
-    else if (![ctx.sharegroup.mipmapped containsIndex:name]) set_max_level(ctx, target, 0);
+    set_max_level(ctx, target, last);
 }
 static void log_upload_format(const char *what, GLenum a, GLenum b, GLenum c)
 {
@@ -674,7 +692,7 @@ static void t290_tex_image2d(GLenum target, GLint level, GLint internal, GLsizei
     GLint border, GLenum format, GLenum type, const GLvoid *pixels)
 {
     gl.TexImage2D(target, level, internal, w, h, border, format, type, pixels);
-    tex_level_defined(target, level);
+    tex_level_defined(target, level, (GLenum)internal, w, h);
     log_upload_format("texture upload", internal, format, type);
 }
 static void t290_compressed_tex_image2d(GLenum target, GLint level, GLenum internal, GLsizei w,
@@ -682,7 +700,7 @@ static void t290_compressed_tex_image2d(GLenum target, GLint level, GLenum inter
 {
     current_ctx()->_gpuWork = YES;
     gl.CompressedTexImage2D(target, level, internal, w, h, border, size, data);
-    tex_level_defined(target, level);
+    tex_level_defined(target, level, internal, w, h);
     log_upload_format("compressed upload", internal, 0, 0);
 }
 static void t290_generate_mipmap(GLenum target)
@@ -720,6 +738,7 @@ static uintptr_t unsupported_private(void *ctx, ...)
         group.surfaces = [NSMapTable strongToWeakObjectsMapTable];
         group.dirty = [NSMutableSet set];
         group.mipmapped = [NSMutableIndexSet indexSet];
+        group.mipLevels = [NSMutableDictionary dictionary];
     }
     _sharegroup = group;
     _framebuffers = [NSMutableDictionary dictionary];
@@ -850,6 +869,9 @@ static uintptr_t unsupported_private(void *ctx, ...)
     if (target == 0x8d41) gl.EGLImageTargetRenderbufferStorageOES(target, mirror->image);
     else {
         gl.EGLImageTargetTexture2DOES(target, mirror->image);
+        [_sharegroup.mipmapped removeIndex:name];
+        _sharegroup.mipLevels[@(name)] = [NSMutableDictionary dictionaryWithObject:
+            @[@(internal), @(w), @(h)] forKey:@0];
         set_max_level(self, target, 0);     /* an IOSurface has no mipmaps */
     }
     images[@(name)] = mirror;

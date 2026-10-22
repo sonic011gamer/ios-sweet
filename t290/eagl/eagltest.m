@@ -258,6 +258,23 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsig
                 if (abs(pixel[k] - expected) > 2) return 50 + c;
             }
         }
+        if (!c) {
+            uint8_t mip[4 * 4];
+            for (unsigned p = 0; p < 4; p++) memcpy(mip + p * 4, cases[c].value, 4);
+            CALL(301, void, (void *, GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *),
+                0x0de1, 1, 0x1908, 2, 2, 0, 0x1908, 0x1401, mip);
+            CALL(63, void, (void *, GLenum), 0x0be2);
+            CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
+            uint8_t pixel[4] = {0};
+            CALL(237, void, (void *, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *),
+                32, 32, 1, 1, 0x1908, 0x1401, pixel);
+            GLenum err = CALL(102, GLenum, (void *));
+            printf("partial mip chain 4x4 + 2x2 (no 1x1) sample %u,%u,%u,%u error %#x\n",
+                pixel[0], pixel[1], pixel[2], pixel[3], err);
+            if (err) return 60;
+            if (!getenv("SWEET_FAKE")) for (unsigned k = 0; k < 4; k++)
+                if (abs(pixel[k] - cases[c].expected[k]) > 2) return 61;
+        }
     }
     CALL(63, void, (void *, GLenum), 0x0be2);
     CALL(195, void, (void *, GLenum, GLint), 0x0cf5, 4);
