@@ -2,7 +2,7 @@
  * Keep eaglprobe.m for observing Apple's implementation independently.
  */
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
+#include "surface.h"
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <fcntl.h>

@@ -1,6 +1,6 @@
 /* Exercise the actual EAGL object and GLI ABI; no Apple GL C entry points. */
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
+#include "surface.h"
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,9 +35,9 @@ int main(void)
             printf("ES%u renderer %s version %s\n", api, renderer, version);
             if (!renderer || !strstr(renderer, "FD504") || !strstr(version, "OpenGL ES")) return 2;
             IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)@{
-                (id)kIOSurfaceWidth: @64, (id)kIOSurfaceHeight: @64,
-                (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfaceBytesPerRow: @256,
-                (id)kIOSurfacePixelFormat: @0x42475241, (id)kIOSurfaceIsGlobal: @YES
+                (__bridge id)kIOSurfaceWidth: @64, (__bridge id)kIOSurfaceHeight: @64,
+                (__bridge id)kIOSurfaceBytesPerElement: @4, (__bridge id)kIOSurfaceBytesPerRow: @256,
+                (__bridge id)kIOSurfacePixelFormat: @0x42475241, (__bridge id)kIOSurfaceIsGlobal: @YES
             });
             if (!surf) return 3;
             GLuint tex = 0, fbo = 0;
@@ -47,7 +47,7 @@ int main(void)
             CALL(674, void, (void *, GLsizei, GLuint *), 1, &fbo);
             CALL(672, void, (void *, GLenum, GLuint), 0x8d40, fbo);
             CALL(677, void, (void *, GLenum, GLenum, GLenum, GLuint, GLint), 0x8d40, 0x8ce0, 0x0de1, tex, 0);
-            GLenum status = CALL(676, GLenum, (void *, GLenum), 0x8d40);
+            GLenum status = CALL(675, GLenum, (void *, GLenum), 0x8d40);
             printf("FBO status %#x\n", status);
             if (status != 0x8cd5) return 5;
             CALL(12, void, (void *, GLfloat, GLfloat, GLfloat, GLfloat), 0.25f, 0.5f, 0.75f, 1.0f);
