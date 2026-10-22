@@ -44,12 +44,24 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
   allowed at EL1), so the call traps correctly. Rails/clocks are already set by
   the t290 shim's `cpu_boost()` (SPMI S5 885 mV, A53 PLL L=89 = 1708.8 MHz) —
   the secondaries come up at full cluster speed.
-- **`out-psci.img` awaits device test** (repo root): byte-exact in-place edit of
-  the booted `out.img`, only the payload cmdline field (ramdisk+0x48) gained
-  ` sweetpsci=hvc`; kernel/gz/DTB byte-identical. `fastboot boot out-psci.img`.
-  Expect `cpu=1 PSCI CPU_ON rc=0` → `entered initCPU mpidr=0x1` → `came alive;
-  SGI1 OK` → cpu=2/3 → driver stack. If a panic `NOT alive: PSCI CPU_ON rc=<n>`
-  appears: -1 NOT_SUPPORTED, -2 INVALID_PARAMS, -3 DENIED, -4 ALREADY_ON.
+- **`out-psci.img` verdict (tested): PSCI conduit fixed** — `CPU_ON rc=0`, cpu1
+  reaches `entered initCPU mpidr=0x1`. Next stop: the boot then freezes with no
+  console output — cpus=4 with cpu1's `IRQs=0` (never `came alive; SGI1 OK`),
+  cpus=1 right after `1/1 CPUs initialized, SGI1 verified`. Both stop before
+  `IOFindBSDRoot`'s `!BSD`/`BSD root:` prints: everyIOSleep/callout wait slept
+  forever = the vtimer PPI never fires.
+- LK verdict (user checkout `/home/snaccy/Lumia950/lk2nd`,
+  `platform/msm8994/include/platform/irqs.h`): `INT_QTMR_VIRTUAL_TIMER_EXP =
+  GIC_PPI_START + 4` = **vtimer INTID 20** (ns-phys = 19). lk2nd's `qgic.c`
+  enables the distributor/interface with plain writel(1) — a single-group GIC,
+  so the missing Group-1 writes are not the issue. Our ADT's 27 = the QEMU
+  virt value.
+- **`out-vt20.img` awaits device test** (repo root): `out-psci.img` (cpus=4,
+  sweetpsci=hvc) with the ADT's `virtual-timer-intid` u32 patched 27 → 20 in
+  place; mkadt_t290.py fixed for future regenerations (commit 451e41e).
+  Expect: past the CPU lines → `SWEET SDHC:` prints (RPM SMD open, L11/L12,
+  card ID, `sdroot0 …`) → `BSD root: sdroot0, major …`. If still silent, dump
+  the plog block 0xd9c00000 (Android-side, `oem ramoops raw`) for more.
 
 - Clean xnu workspace for the repo patchset: `/tmp/opencode/xnu-verify` reset to
   1b191cb (xnu-8796.141.3); all 57 `xnu/patches/*.patch` apply cleanly; stage
