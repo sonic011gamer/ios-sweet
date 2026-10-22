@@ -6,6 +6,23 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **0135 ACTUAL BOOT: CPU fallback confirmed.** User returned to Android;
+  raw pstore saved ios-t290/logs/boot0135-sensors. SD update done 4/4.
+  Real FD504 ES2 passed clear/triangle, IOSurface aliases/rows, LA08,
+  RGBA blending and partial mip chain. BGRA icon then sampled 0,0,0,255
+  with GL error 0, eagltest exit 51. t290launch correctly launched
+  backboardd WITHOUT bridge (system renderer). No measured GPU UI FPS
+  for 0135. Fake CI PASS was not pixel validation.
+- Fix in progress: mip metadata previously compared only internal token
+  plus dimensions. RGBA and BGRA uploads both used GL_RGBA internal but
+  can select different Mesa storage, leaving incompatible mip levels.
+  Track external format/type as well and clamp before incompatible levels.
+  Existing real regression reuses the texture across this exact transition.
+  Needs CI and real-device pixel retest; do not bypass launcher guard.
+- Read-only sensor reconnaissance: Android sensorservice reports KIONIX
+  KXTJ3 accelerometer; no gyroscope in device sensor list. No driver work
+  installed. User clarified immediate priority is CPU fallback diagnosis.
+
 - **READY FOR HARDWARE BOOT:** run 39794145243 completed all graphics steps
   successfully, including native Intel Mesa and fake-GPU ES2/ES3 regressions.
   These do not validate real GPU pixels. Downloaded t290eagl artifact into

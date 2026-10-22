@@ -214,6 +214,9 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo, unsig
     CALL(195, void, (void *, GLenum, GLint), 0x0cf5, 1); /* unpack alignment */
     for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         if (cases[c].type == 0x140b && api < 3) continue;
+        /* Reuse the same texture after the RGBA partial chain. BGRA may
+         * choose different Mesa storage despite the same unsized internal
+         * format; old RGBA mip levels must not make it incomplete. */
         if (cases[c].cpp) {
             uint8_t data[16 * 8];
             for (unsigned p = 0; p < 16; p++) memcpy(data + p * cases[c].cpp, cases[c].value, cases[c].cpp);

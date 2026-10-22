@@ -647,7 +647,8 @@ static void set_max_level(T290Context *ctx, GLenum target, GLint level)
     gl.TexParameteri(target, 0x813d, level);
     gl.GetError();
 }
-static void tex_level_defined(GLenum target, GLint level, GLenum internal, GLsizei w, GLsizei h)
+static void tex_level_defined(GLenum target, GLint level, GLenum internal, GLsizei w, GLsizei h,
+    GLenum uploadFormat, GLenum uploadType)
 {
     if (target != 0x0de1 || level < 0 || level > 31 || w <= 0 || h <= 0) return;
     T290Context *ctx = current_ctx();
@@ -655,7 +656,10 @@ static void tex_level_defined(GLenum target, GLint level, GLenum internal, GLsiz
     gl.GetIntegerv(0x8069, &name);
     NSMutableDictionary *levels = ctx.sharegroup.mipLevels[@(name)];
     if (!levels) ctx.sharegroup.mipLevels[@(name)] = levels = [NSMutableDictionary dictionary];
-    NSArray *definition = @[@(internal), @(w), @(h)];
+    /* The same unsized RGBA internal format can select different Mesa storage
+     * for RGBA and BGRA uploads. Their old mip levels are then incompatible.
+     * Keep the upload signature, not just the caller's internal-format token. */
+    NSArray *definition = @[@(internal), @(w), @(h), @(uploadFormat), @(uploadType)];
     if (!level && ![levels[@0] isEqual:definition]) [ctx.sharegroup.mipmapped removeIndex:name];
     levels[@(level)] = definition;
     if ([ctx.sharegroup.mipmapped containsIndex:name]) return;
@@ -672,6 +676,7 @@ static void tex_level_defined(GLenum target, GLint level, GLenum internal, GLsiz
         height = MAX(1, height / 2);
         NSArray *next = levels[@(last + 1)];
         if (!next || [next[0] unsignedIntValue] != format ||
+            ![next[3] isEqual:base[3]] || ![next[4] isEqual:base[4]] ||
             [next[1] intValue] != width || [next[2] intValue] != height) break;
         last++;
     }
@@ -692,7 +697,7 @@ static void t290_tex_image2d(GLenum target, GLint level, GLint internal, GLsizei
     GLint border, GLenum format, GLenum type, const GLvoid *pixels)
 {
     gl.TexImage2D(target, level, internal, w, h, border, format, type, pixels);
-    tex_level_defined(target, level, (GLenum)internal, w, h);
+    tex_level_defined(target, level, (GLenum)internal, w, h, format, type);
     log_upload_format("texture upload", internal, format, type);
 }
 static void t290_compressed_tex_image2d(GLenum target, GLint level, GLenum internal, GLsizei w,
@@ -700,7 +705,7 @@ static void t290_compressed_tex_image2d(GLenum target, GLint level, GLenum inter
 {
     current_ctx()->_gpuWork = YES;
     gl.CompressedTexImage2D(target, level, internal, w, h, border, size, data);
-    tex_level_defined(target, level, internal, w, h);
+    tex_level_defined(target, level, internal, w, h, 0, 0);
     log_upload_format("compressed upload", internal, 0, 0);
 }
 static void t290_generate_mipmap(GLenum target)
@@ -871,7 +876,7 @@ static uintptr_t unsupported_private(void *ctx, ...)
         gl.EGLImageTargetTexture2DOES(target, mirror->image);
         [_sharegroup.mipmapped removeIndex:name];
         _sharegroup.mipLevels[@(name)] = [NSMutableDictionary dictionaryWithObject:
-            @[@(internal), @(w), @(h)] forKey:@0];
+            @[@(internal), @(w), @(h), @(format), @(type)] forKey:@0];
         set_max_level(self, target, 0);     /* an IOSurface has no mipmaps */
     }
     images[@(name)] = mirror;
