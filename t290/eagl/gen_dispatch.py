@@ -57,12 +57,18 @@ draw_calls = {
     'draw_arrays': 'DRAW_PRIMITIVES', 'draw_elements': 'DRAW_PRIMITIVES',
     'draw_range_elements': 'DRAW_PRIMITIVES', 'draw_arrays_instanced': 'DRAW_PRIMITIVES',
     'draw_elements_instanced': 'DRAW_PRIMITIVES', 'clear': 'DRAW_CLEAR',
+    'draw_elements_base_vertex': 'DRAW_PRIMITIVES',
+    'draw_range_elements_base_vertex': 'DRAW_PRIMITIVES',
+    'draw_elements_instanced_base_vertex': 'DRAW_PRIMITIVES',
+    'multi_draw_arrays': 'DRAW_PRIMITIVES', 'multi_draw_elements': 'DRAW_PRIMITIVES',
+    'multi_draw_elements_base_vertex': 'DRAW_PRIMITIVES',
+    'draw_arrays_indirect': 'DRAW_PRIMITIVES', 'draw_elements_indirect': 'DRAW_PRIMITIVES',
     'clear_bufferiv': 'DRAW_CLEAR', 'clear_bufferuiv': 'DRAW_CLEAR',
     'clear_bufferfv': 'DRAW_CLEAR', 'clear_bufferfi': 'DRAW_CLEAR',
     'blit_framebuffer_EXT': 'DRAW_ALL_ROWS',
 }
-texture_writes = {'copy_tex_sub_image2D', 'tex_sub_image2D'}
-texture_definitions = {'tex_image2D', 'copy_tex_image2D'}
+texture_writes = {'copy_tex_sub_image2D', 'tex_sub_image2D', 'compressed_tex_sub_image2D'}
+texture_definitions = {'tex_image2D', 'copy_tex_image2D', 'compressed_tex_image2D', 'tex_storage2D'}
 check_calls = set(draw_calls) | texture_writes | texture_definitions | {
     'pixel_storei', 'use_program_object_ARB', 'compile_shader_ARB', 'link_program_ARB',
     'framebuffer_texture2D_EXT', 'framebuffer_renderbuffer_EXT', 'bind_framebuffer_EXT',

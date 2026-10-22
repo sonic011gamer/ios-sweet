@@ -248,9 +248,9 @@ enum { DRAW_PRIMITIVES, DRAW_CLEAR, DRAW_ALL_ROWS };
 
 static void t290_make_current(void *ptr)
 {
-    T290Context *ctx = (__bridge T290Context *)ptr;
     if (thread_current == ptr)
         return;
+    T290Context *ctx = (__bridge T290Context *)ptr;
     if (!mesa_current(ctx ? ctx->_mesa : NULL, ctx ? &ctx->_dummy : NULL, 0x1401, 1, 1)) {
         plog("t290eagl: MesaMakeCurrent failed %p", ptr);
         return;

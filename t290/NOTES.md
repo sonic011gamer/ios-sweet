@@ -32,7 +32,14 @@
   exit cleanup), no redundant Flush before Finish on a full-screen frame.
   New guard tests sample/blend real CA formats: RGBA/BGRA icons, A8/L8
   glyphs, RGBA16F intermediates, ASTC icons, all with a mipmapped filter.
+  Draw tracking now also covers base-vertex/multi/indirect variants, and
+  compressed texture replacements/updates participate in IOSurface tracking
+  and GL error checks. Previously these could bypass the presentation wait
+  or retain stale image metadata after replacing texture storage.
   CI/device results for these new changes are pending; no FPS gain claimed.
+- Initial commit a0cd21f pushed; XNU CI 39780060304 and EAGL 39780057223
+  queued at the last check (GitHub macOS runners). Kernel source is locally
+  syntax-checked; real GPU format/blend tests need the next tablet boot.
 - Next: commit/build 0135 and the bridge/tests through CI, prepare a checked
   recovery image and SD request. A new recovery write requires user approval
   under AGENTS.md; no new approval has been requested or received yet.
