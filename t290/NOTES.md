@@ -4,6 +4,19 @@
 (XNU + неизменённый userland iOS 16 на Redmi Note 10 Pro). Локальная копия:
 `D:\test1\ios-sweet`, его `NOTES.md` — подробный журнал того, как это делалось.
 
+## Active handoff 2026-10-22: EAGL bridge
+
+- Verified from `ios-t290/logs/ps-eagl4.bin`: `t290launch` successfully injects
+  the probe into backboardd, but Apple's `initWithAPI:properties:` returns nil
+  for both ES3 and ES2. The GUI is still software rendered.
+- Kernel 0129 already supports IOSurface imports and 256-byte row alignment.
+  Mesa run 39729025501 failed: missing prototypes for OSMesaT290CreateImage /
+  DestroyImage. Fixing these and adding real GLES contexts (patch 0004).
+- Work in progress: typed GLI dispatch adapters and a Mesa-backed EAGL object.
+  This is not yet a verified GPU-accelerated GUI. Keep the existing probe and
+  launchd rollback (`/private/var/tmp/t290launch.off`) available.
+- Device observed in rooted Android; no partitions changed in this session.
+
 ## Handoff 2026-10-21 (вечер)
 
 - **GPU на голом железе работает** (gpu21, `t290/GPU.md` «SOLVED»): CP выполнил наше

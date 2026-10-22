@@ -1,5 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+**Active SM-T290 work (2026-10-22):** see `t290/NOTES.md` and `t290/GPU.md`.
+GPU command submission works; the EAGL probe is injected but Apple contexts
+return nil. Mesa IOSurface build fix and GLES/GLI bridge are in progress.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

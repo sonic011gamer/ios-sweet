@@ -38,26 +38,36 @@ meson setup build "${cfg[@]}" \
 	-Dc_args="-I$stub -I$PWD/include" -Dcpp_args="-I$stub -I$PWD/include" \
 	-Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled \
 	-Dllvm=disabled -Dvulkan-drivers= -Dgallium-drivers=softpipe,freedreno \
-	-Dosmesa=true -Dshared-glapi=disabled -Dgles1=disabled -Dgles2=disabled \
+	-Dosmesa=true -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled \
 	-Dxmlconfig=disabled -Dzstd=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
 	-Dbuild-tests=false -Dtools=
 ninja -C build src/compiler/spirv/spirv_info.h src/compiler/spirv/vtn_generator_ids.h > /dev/null 2>&1 || true
-ninja -C build -k 0 src/gallium/targets/osmesa/libOSMesa.8.dylib 2>&1 | tee "$work/build.log" | grep -E "error|FAILED" | head -200 || true
-grep -c "FAILED" "$work/build.log" || true
+ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib > "$work/build.log" 2>&1 || {
+	tail -100 "$work/build.log"
+	exit 1
+}
 
 # OSMesa dylib + the GL test, ad-hoc signed, for /usr/lib on the tablet
 out=$work/out
 mkdir -p "$out"
 lib=$(ls build/src/gallium/targets/osmesa/libOSMesa*.dylib | head -1)
+glapi=$(ls build/src/mapi/shared-glapi/libglapi*.dylib | head -1)
+cp -L "$glapi" "$out/libglapi.0.dylib"
+cp -L "$lib" "$out/libOSMesa.8.dylib"
+install_name_tool -id /usr/lib/libglapi.0.dylib "$out/libglapi.0.dylib"
+# Meson embeds an absolute build path on Darwin.  Rewrite the dependency
+# before signing so every artifact can run outside the runner checkout.
+dep=$(otool -L "$out/libOSMesa.8.dylib" | awk '/libglapi.*dylib/{print $1; exit}')
+install_name_tool -change "$dep" /usr/lib/libglapi.0.dylib "$out/libOSMesa.8.dylib"
 if [ "$target" = mac ]; then
-	cp -L "$lib" "$out/libOSMesa.8.dylib"
+	install_name_tool -change /usr/lib/libglapi.0.dylib @loader_path/libglapi.0.dylib "$out/libOSMesa.8.dylib"
+	codesign -s - -f "$out/libglapi.0.dylib" "$out/libOSMesa.8.dylib"
 	clang -O1 -g -Wall -o "$out/glprobe" "$here/../ios/glprobe.c"
 	ls -la "$out"
 	exit 0
 fi
-cp -L "$lib" "$out/libOSMesa.8.dylib"
 install_name_tool -id /usr/lib/libOSMesa.8.dylib "$out/libOSMesa.8.dylib"
-codesign -s - -f "$out/libOSMesa.8.dylib"
+codesign -s - -f "$out/libglapi.0.dylib" "$out/libOSMesa.8.dylib"
 xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall \
 	-Iinclude -o "$out/gltri" "$here/test/gltri.c" "$out/libOSMesa.8.dylib"
 codesign -s - -f --entitlements "$here/../ios/ent.plist" "$out/gltri"

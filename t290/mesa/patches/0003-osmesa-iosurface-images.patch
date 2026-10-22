@@ -1,6 +1,6 @@
 diff -ruN a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa/osmesa.c
 --- a/src/gallium/frontends/osmesa/osmesa.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/frontends/osmesa/osmesa.c	2026-10-22 07:28:47.295956263 +0800
++++ b/src/gallium/frontends/osmesa/osmesa.c	2026-10-22 14:26:37.134969959 +0800
 @@ -80,6 +80,7 @@
  #include "postprocess/postprocess.h"
  
@@ -9,7 +9,7 @@ diff -ruN a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa
  
  
  
-@@ -142,6 +143,42 @@
+@@ -142,6 +143,46 @@
  
  static struct pipe_frontend_screen *global_fscreen = NULL;
  
@@ -20,6 +20,10 @@ diff -ruN a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa
 + */
 +#define T290_IMAGE_MAGIC 0x54323930u
 +#define T290_IOSURFACE_HANDLE 0x40000000u    /* sweet backend: IOSurface id */
++
++PUBLIC void *OSMesaT290CreateImage(uint32_t surface_id, uint32_t width,
++   uint32_t height, uint32_t bytes_per_row, uint32_t offset, uint32_t fourcc);
++PUBLIC void OSMesaT290DestroyImage(void *image);
 +
 +struct t290_image {
 +   uint32_t magic;
@@ -52,7 +56,7 @@ diff -ruN a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa
  static void
  destroy_st_manager(void)
  {
-@@ -162,7 +199,8 @@
+@@ -162,7 +203,8 @@
     if (global_fscreen) {
        global_fscreen->screen = osmesa_create_screen();
        global_fscreen->get_param = osmesa_st_get_param;
@@ -62,7 +66,7 @@ diff -ruN a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa
     }
  }
  
-@@ -523,6 +561,93 @@
+@@ -523,6 +565,93 @@
   *                     display lists.  NULL indicates no sharing.
   * Return:  an OSMesaContext or 0 if error
   */

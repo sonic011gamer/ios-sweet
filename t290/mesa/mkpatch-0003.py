@@ -29,6 +29,10 @@ edit(f, '''static struct pipe_frontend_screen *global_fscreen = NULL;
 #define T290_IMAGE_MAGIC 0x54323930u
 #define T290_IOSURFACE_HANDLE 0x40000000u    /* sweet backend: IOSurface id */
 
+PUBLIC void *OSMesaT290CreateImage(uint32_t surface_id, uint32_t width,
+   uint32_t height, uint32_t bytes_per_row, uint32_t offset, uint32_t fourcc);
+PUBLIC void OSMesaT290DestroyImage(void *image);
+
 struct t290_image {
    uint32_t magic;
    struct pipe_resource *res;
