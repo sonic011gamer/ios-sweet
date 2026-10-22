@@ -6,7 +6,7 @@
 
 ## Active handoff 2026-10-22: EAGL bridge
 
-### Latest result: real GPU pixel tests PASS; compositor client-image crash fixed, retest pending
+### Latest result: GPU pixel tests PASS; compositor needs kernel 0130
 
 - Boot with bridge3 completed all 5 SD operations. `eagltest` reported ES2
   and ES3 renderer FD504, FBO 0x8cd5, clear BGRA 191/128/64/255, triangle
@@ -25,18 +25,28 @@
   IOSurfaces still import directly. The new device test checks that this
   interposition actually takes effect; otherwise the guard uses CPU GUI.
 - **EAGL build/mac smoke CI 39737962131 passed**. Artifacts `dl/eagl-bridge4`.
-  **Current pending SD request: 2 puts**, bridge4 dylib and eagltest only.
-  Existing guarded launchd config / t290launch remain in use. User asked
-  to boot and retest; Android was present when the request was written.
+  Boot4 consumed the 2 puts successfully. Its test confirms interposition
+  and real GPU pixels, but calls from the prebound QuartzCore shared-cache
+  stubs bypass the interposed public entry point. Backboardd crashes at
+  the identical IOSurfaceClientGetBulkAttachments memcpy from NULL+0x30.
+  New logs: `ios-t290/logs/eagl4-{console,head}.bin`. The workaround is not
+  sufficient for the compositor; no further shim-only reboot is useful.
 - Kernel fix 0c84f68 / patch 0130 returns kIOReturnUnsupported for selector
-  6 instead of a bogus success. Dry-run applies. **Kernel CI 39738089026
-  running**, SWEET_BOARD=t290. No recovery/boot partition flashed. The
-  bridge4 test uses existing kernel 0129; kernel 0130 would make the
-  workaround unnecessary but is not installed.
-- Next: read pstore after bridge4 boot. Look for regression check, final
-  pixel PASS, backboardd texture-upload fallback and a rendered UI. If the
-  hook does not intercept calls from QuartzCore, kernel 0130 is the fix;
-  prepare/review its boot image before asking to write recovery.
+  6 instead of a bogus success. **Kernel CI 39738089026 PASSED**,
+  SWEET_BOARD=t290; artifact download pending. No partitions flashed.
+- Current recovery backed up and SHA-verified on device and PC at
+  `ios-t290/backup-20261022-gpu/recovery-before-0130.img`, SHA256
+  dba7a21a196c3fe04a0ed432c29bb32dacabb0bfdecf0e823fe4dffbbf7b00cf.
+  `dl/eagl-k0130/repack.py` replaces only the XNU payload, preserving shim,
+  appended DTB, ADT, boot args and opaque Samsung/AVB metadata. The unchanged
+  payload packing round trip is byte-identical to the backup.
+- Next: finish the kernel download, build/verify recovery-0130.img, push
+  the file to Android and verify its SHA256. Then request permission to
+  write recovery as required by AGENTS.md. Installation is NOT authorized
+  yet. Existing launchd guard and bridge4 can test kernel 0130 unchanged.
+- `t290-xfer.ps1` now checks every adb exit code and refuses to use stale
+  local transfer headers after connection errors. Tested normal result
+  reading and an injected native-command failure (exit 7); both pass.
 
 ### Earlier steps
 

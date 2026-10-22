@@ -16,12 +16,23 @@ $XferLba = 33558528
 $DataLba = $XferLba + 64
 $Manifest = Join-Path $env:TEMP 't290-xfer.json'
 
-function Sh([string]$cmd) { & $adb shell "$su -c '$cmd'" }
+function Invoke-Adb {
+	param([Parameter(ValueFromRemainingArguments = $true)][string[]]$AdbArguments)
+	& $adb @AdbArguments
+	if ($LASTEXITCODE -ne 0) {
+		throw "adb failed (exit $LASTEXITCODE): $($AdbArguments[0]); no cached transfer result will be used"
+	}
+}
+function Sh([string]$cmd) { Invoke-Adb shell "$su -c '$cmd'" }
+
+# Never interpret an old temporary header after a disconnected-device error.
+$deviceState = Invoke-Adb get-state
+if ($deviceState -ne 'device') { throw "Android adb is not ready: $deviceState" }
 
 if ($Result) {
 	$tmp = Join-Path $env:TEMP 't290-xfer-hdr.bin'
 	Sh "dd if=/dev/block/mmcblk1 of=/data/local/tmp/xfer-hdr.bin bs=512 skip=$XferLba count=33" | Out-Null
-	& $adb pull /data/local/tmp/xfer-hdr.bin $tmp | Out-Null
+	Invoke-Adb pull /data/local/tmp/xfer-hdr.bin $tmp | Out-Null
 	$h = [IO.File]::ReadAllBytes($tmp)
 	if ([Text.Encoding]::ASCII.GetString($h, 0, 8) -ne 'T290XFR1') { throw 'no request on the card' }
 	$nops = [BitConverter]::ToUInt32($h, 12); $state = [BitConverter]::ToUInt32($h, 16)
@@ -38,7 +49,7 @@ if ($Result) {
 			if (-not $local) { $local = Join-Path $env:TEMP ([IO.Path]::GetFileName($path)) }
 			$n = [math]::Ceiling($res / 512)
 			Sh "dd if=/dev/block/mmcblk1 of=/data/local/tmp/xfer-get.bin bs=512 skip=$lba count=$n" | Out-Null
-			& $adb pull /data/local/tmp/xfer-get.bin "$local.part" | Out-Null
+			Invoke-Adb pull /data/local/tmp/xfer-get.bin "$local.part" | Out-Null
 			$bytes = [IO.File]::ReadAllBytes("$local.part")
 			[IO.File]::WriteAllBytes($local, $bytes[0..($res - 1)])
 			Remove-Item "$local.part"
@@ -86,7 +97,7 @@ foreach ($b in $blobs) { $b.data.CopyTo($img, ($b.lba - $XferLba) * 512) }
 $f = Join-Path $env:TEMP 't290-xfer.bin'
 [IO.File]::WriteAllBytes($f, $img)
 ConvertTo-Json -InputObject @($man) | Out-File -Encoding utf8 $Manifest
-& $adb push $f /data/local/tmp/xfer.bin | Out-Null
+Invoke-Adb push $f /data/local/tmp/xfer.bin | Out-Null
 Sh "dd if=/data/local/tmp/xfer.bin of=/dev/block/mmcblk1 bs=512 seek=$XferLba conv=notrunc && sync" | Out-Null
 $back = Sh "dd if=/dev/block/mmcblk1 bs=512 skip=$XferLba count=1 2>/dev/null | head -c 8"
 if ($back -ne 'T290XFR1') { throw "request not written (read back '$back')" }
