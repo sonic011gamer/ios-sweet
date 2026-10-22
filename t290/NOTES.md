@@ -6,6 +6,25 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **Intel fallback now running:** XNU **39787534608**, commit 2dce1a2,
+  `runner=macos-15-intel`, `sweet_board=t290`. Compatible-cache download and
+  Fetch build script both PASS; last observed step Deps in progress. Preserve
+  this as the sole Actions run. Old ARM run 39781091148 was cancelled and
+  deleted, as was first Intel setup attempt 39787210982.
+- New optional workflow runner/IIG cache inputs, tools/iig-cache.py. The
+  wrapper reuses the Xcode 15-generated 34 DriverKit files only after all
+  39 XNU interface source hashes match. Locally checked all 17 definitions:
+  outputs byte-identical, changed input rejected. Cache SHA256
+  `0ebc2a8416ac45cb43e3bd2aafc2f567bb86a32e7a11c3bfa751aaf65c8f41a9`.
+  Separate draft release `ci-iig-8796` holds `iig-cache.json.xz` (58880 B),
+  containing only generated OSS XNU source. No firmware/SDK/device data.
+  Draft asset read requires job Contents:write; first Intel attempt had
+  Contents:read and failed at cache retrieval before any compiler ran.
+  The second attempt's cache download is confirmed successful.
+- No new bridge artifact or kernel image has been downloaded/staged yet.
+  Installed recovery remains 0133. Latest partial-mip bridge code is in git,
+  but still needs building (prior bridge artifact excludes that last fix).
+
 - **Latest user instruction: delete previous Actions runs, keep only one
   kernel build. DONE:** 94 runs inventoried in this fork, 93 deleted through
   the API; a fresh paginated listing contains only XNU **39781091148** for
