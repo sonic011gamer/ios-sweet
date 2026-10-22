@@ -119,9 +119,22 @@ sweet_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
    return bo_wrap(dev, size, (uint32_t)out[0], out[1]);
 }
 
-/* no import between processes yet */
+/*
+ * Import: handle SWEET_IOSURFACE_HANDLE | id maps that IOSurface's pixels
+ * into the GPU window (OSMesaT290CreateImage); other handles are unknown.
+ */
 struct fd_bo *
 sweet_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
 {
-   return NULL;
+   struct sweet_device *sd = to_sweet_device(dev);
+   if (!(handle & SWEET_IOSURFACE_HANDLE))
+      return NULL;
+   uint64_t in = handle & ~SWEET_IOSURFACE_HANDLE, out[3] = {0};
+   uint32_t n = 3;
+   kern_return_t kr = sweet_call(sd->conn, SWEET_GPU_IMPORT_SURFACE, &in, 1, out, &n);
+   if (kr) {
+      ERROR_MSG("import of IOSurface %u failed: %#x", (unsigned)in, kr);
+      return NULL;
+   }
+   return bo_wrap(dev, (uint32_t)out[2], (uint32_t)out[0], out[1]);
 }

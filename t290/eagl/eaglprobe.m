@@ -14,6 +14,26 @@
 #include <unistd.h>
 
 static int logfd = -1;
+static mach_port_t klog;        /* SweetGPU user client: selector 7 = kernel log */
+
+/* IOKit, declared here (the iOS SDK has no IOKit headers) */
+extern const mach_port_t kIOMasterPortDefault;
+CFMutableDictionaryRef IOServiceMatching(const char *name);
+mach_port_t IOServiceGetMatchingService(mach_port_t main, CFDictionaryRef matching);
+kern_return_t IOServiceOpen(mach_port_t service, mach_port_t task, uint32_t type, mach_port_t *conn);
+kern_return_t IOObjectRelease(mach_port_t object);
+kern_return_t IOConnectCallStructMethod(mach_port_t conn, uint32_t sel, const void *in, size_t inSize,
+    void *out, size_t *outSize);
+
+static void
+klog_open(void)
+{
+	mach_port_t svc = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetGPU"));
+	if (svc) {
+		IOServiceOpen(svc, mach_task_self(), 0, &klog);
+		IOObjectRelease(svc);
+	}
+}
 
 static void
 plog(const char *fmt, ...)
@@ -27,6 +47,8 @@ plog(const char *fmt, ...)
 		return;
 	if (n > (int)sizeof(buf) - 2)
 		n = sizeof(buf) - 2;
+	if (klog)
+		IOConnectCallStructMethod(klog, 7, buf, n, NULL, NULL);
 	buf[n++] = '\n';
 	if (logfd >= 0) {
 		write(logfd, buf, n);
@@ -91,6 +113,7 @@ t290eagl_init(void)
 	const char *p = getprogname();
 	if (p)
 		strlcpy(name, p, sizeof(name));
+	klog_open();
 	logfd = open("/private/var/tmp/t290eagl.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
 	plog("t290eagl: loaded into %s pid %d uid %d", name, getpid(), getuid());
 	Class c = objc_getClass("EAGLContext");

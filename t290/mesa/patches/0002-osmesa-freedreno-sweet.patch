@@ -1,6 +1,6 @@
 diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
 --- a/src/gallium/targets/osmesa/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/meson.build	2026-10-21 22:35:23.514127032 +0800
++++ b/src/gallium/targets/osmesa/meson.build	2026-10-22 07:28:43.854950483 +0800
 @@ -4,6 +4,17 @@
  osmesa_link_with = []
  osmesa_link_args = []
@@ -14,7 +14,7 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
 +  osmesa_c_args += '-DT290_SWEET'
 +  osmesa_incs += inc_freedreno
 +  osmesa_deps += driver_freedreno
-+  osmesa_link_args += ['-framework', 'IOKit', '-framework', 'CoreFoundation']
++  osmesa_link_args += ['-framework', 'IOKit', '-framework', 'CoreFoundation', '-framework', 'IOSurface']
 +endif
  
  if with_shared_glapi
@@ -44,7 +44,7 @@ diff -ruN a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/
    soversion : host_machine.system() == 'windows' ? '' : '8',
 diff -ruN a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
 --- a/src/gallium/targets/osmesa/osmesa_target.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-21 22:35:23.514345856 +0800
++++ b/src/gallium/targets/osmesa/osmesa_target.c	2026-10-22 07:28:43.855187120 +0800
 @@ -26,6 +26,49 @@
  
  #include "sw/null/null_sw_winsys.h"

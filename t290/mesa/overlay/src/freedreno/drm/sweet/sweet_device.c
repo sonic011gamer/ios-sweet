@@ -13,9 +13,24 @@ static struct {
    pthread_mutex_t lock;
    void *ptr[FAKE_MAX_BO];
    uint64_t size[FAKE_MAX_BO];
+   bool external[FAKE_MAX_BO];   /* imported IOSurface: not ours to unmap */
    uint64_t next_va;
    uint32_t seq;
-} fake = { PTHREAD_MUTEX_INITIALIZER, {0}, {0}, 0x10000000, 0 };
+} fake = { PTHREAD_MUTEX_INITIALIZER, {0}, {0}, {0}, 0x10000000, 0 };
+
+/* IOSurface.framework (fake imports use the host's real surfaces) */
+void *IOSurfaceLookup(uint32_t id);
+void *IOSurfaceGetBaseAddress(void *surface);
+size_t IOSurfaceGetAllocSize(void *surface);
+
+static unsigned
+fake_slot(void)
+{
+   unsigned h;
+   for (h = 1; h < FAKE_MAX_BO && fake.ptr[h]; h++)
+      ;
+   return h;
+}
 
 static kern_return_t
 fake_call(uint32_t sel, const uint64_t *in, uint64_t *out, uint32_t *nout)
@@ -32,9 +47,7 @@ fake_call(uint32_t sel, const uint64_t *in, uint64_t *out, uint32_t *nout)
       break;
    case SWEET_GPU_ALLOC: {
       uint64_t size = (in[0] + 4095) & ~4095ull;
-      unsigned h;
-      for (h = 1; h < FAKE_MAX_BO && fake.ptr[h]; h++)
-         ;
+      unsigned h = fake_slot();
       void *p = h < FAKE_MAX_BO ? mmap(NULL, size, PROT_READ | PROT_WRITE,
                                        MAP_ANON | MAP_PRIVATE, -1, 0) : MAP_FAILED;
       if (p == MAP_FAILED) {
@@ -52,10 +65,30 @@ fake_call(uint32_t sel, const uint64_t *in, uint64_t *out, uint32_t *nout)
    }
    case SWEET_GPU_FREE:
       if (in[0] < FAKE_MAX_BO && fake.ptr[in[0]]) {
-         munmap(fake.ptr[in[0]], fake.size[in[0]]);
+         if (!fake.external[in[0]])
+            munmap(fake.ptr[in[0]], fake.size[in[0]]);
          fake.ptr[in[0]] = NULL;
+         fake.external[in[0]] = false;
       }
       break;
+   case SWEET_GPU_IMPORT_SURFACE: {
+      void *s = IOSurfaceLookup((uint32_t)in[0]);
+      unsigned h = fake_slot();
+      if (!s || h >= FAKE_MAX_BO) {
+         kr = KERN_INVALID_ARGUMENT;
+         break;
+      }
+      uint64_t size = (IOSurfaceGetAllocSize(s) + 4095) & ~4095ull;
+      fake.ptr[h] = IOSurfaceGetBaseAddress(s);
+      fake.size[h] = size;
+      fake.external[h] = true;
+      out[0] = h;
+      out[1] = fake.next_va;
+      out[2] = size;
+      *nout = 3;
+      fake.next_va += size;
+      break;
+   }
    case SWEET_GPU_SUBMIT:
       out[0] = ++fake.seq;
       *nout = 1;

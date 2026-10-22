@@ -35,7 +35,7 @@ jobs:
           mkdir -p out
           xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall -fobjc-arc \
             -dynamiclib -install_name /usr/lib/t290eagl.dylib -o out/t290eagl.dylib \
-            t290/eagl/eaglprobe.m -framework Foundation
+            t290/eagl/eaglprobe.m -framework Foundation -framework IOKit
           codesign -s - -f out/t290eagl.dylib
           otool -L out/t290eagl.dylib
       - uses: actions/upload-artifact@v4

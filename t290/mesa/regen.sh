@@ -6,7 +6,7 @@ P=/mnt/d/test1/ios-sweet/t290/mesa
 rm -rf /tmp/mp && mkdir -p /tmp/mp && cd /tmp/mp
 tar xf /mnt/d/test1/dl/mesa/mesa.tar.xz
 mv mesa-24.2.8 base
-for n in 0001 0002; do
+for n in 0001 0002 0003; do
 	name=$(ls "$P"/mkpatch-$n.py)
 	rm -rf a b && cp -a base a && cp -a base b
 	python3 "$name" b

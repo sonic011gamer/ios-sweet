@@ -1,6 +1,6 @@
 diff -ruN a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
 --- a/src/freedreno/common/freedreno_devices.py	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/common/freedreno_devices.py	2026-10-21 22:35:19.266886586 +0800
++++ b/src/freedreno/common/freedreno_devices.py	2026-10-22 07:28:39.997657483 +0800
 @@ -250,6 +250,7 @@
      ))
  
@@ -11,7 +11,7 @@ diff -ruN a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/fre
          GPUId(509),
 diff -ruN a/src/freedreno/drm/freedreno_device.c b/src/freedreno/drm/freedreno_device.c
 --- a/src/freedreno/drm/freedreno_device.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/drm/freedreno_device.c	2026-10-21 22:35:19.267875615 +0800
++++ b/src/freedreno/drm/freedreno_device.c	2026-10-22 07:28:39.998563891 +0800
 @@ -41,6 +41,9 @@
  #ifdef HAVE_FREEDRENO_VIRTIO
  struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
@@ -61,7 +61,7 @@ diff -ruN a/src/freedreno/drm/freedreno_device.c b/src/freedreno/drm/freedreno_d
     if (dev)
 diff -ruN a/src/freedreno/drm/freedreno_drmif.h b/src/freedreno/drm/freedreno_drmif.h
 --- a/src/freedreno/drm/freedreno_drmif.h	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/drm/freedreno_drmif.h	2026-10-21 22:35:19.266501005 +0800
++++ b/src/freedreno/drm/freedreno_drmif.h	2026-10-22 07:28:39.997191001 +0800
 @@ -51,6 +51,9 @@
     FD_PIPE_MAX
  };
@@ -74,7 +74,7 @@ diff -ruN a/src/freedreno/drm/freedreno_drmif.h b/src/freedreno/drm/freedreno_dr
     FD_GMEM_SIZE,
 diff -ruN a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
 --- a/src/freedreno/drm/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/drm/meson.build	2026-10-21 22:35:19.267395860 +0800
++++ b/src/freedreno/drm/meson.build	2026-10-22 07:28:39.998138890 +0800
 @@ -62,6 +62,17 @@
    ]
  endif
@@ -104,7 +104,7 @@ diff -ruN a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
  
 diff -ruN a/src/freedreno/ir3/ir3_disk_cache.c b/src/freedreno/ir3/ir3_disk_cache.c
 --- a/src/freedreno/ir3/ir3_disk_cache.c	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/ir3/ir3_disk_cache.c	2026-10-21 22:35:19.267556118 +0800
++++ b/src/freedreno/ir3/ir3_disk_cache.c	2026-10-22 07:28:39.998346192 +0800
 @@ -52,12 +52,23 @@
        return;
  
@@ -131,7 +131,7 @@ diff -ruN a/src/freedreno/ir3/ir3_disk_cache.c b/src/freedreno/ir3/ir3_disk_cach
     _mesa_sha1_format(timestamp, id_sha1);
 diff -ruN a/src/freedreno/meson.build b/src/freedreno/meson.build
 --- a/src/freedreno/meson.build	2024-11-28 08:08:18.000000000 +0800
-+++ b/src/freedreno/meson.build	2026-10-21 22:35:19.267139997 +0800
++++ b/src/freedreno/meson.build	2026-10-22 07:28:39.997868388 +0800
 @@ -25,7 +25,7 @@
  subdir('ir3')
  subdir('fdl')

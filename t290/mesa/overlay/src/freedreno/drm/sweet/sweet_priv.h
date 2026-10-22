@@ -38,7 +38,12 @@ enum {
    SWEET_GPU_SUBMIT = 3, /* ib address, dwords -> fence seq */
    SWEET_GPU_WAIT = 4,   /* seq, timeout ms */
    SWEET_GPU_FENCE = 5,  /* -> last completed seq */
+   SWEET_GPU_IMPORT_SURFACE = 6, /* IOSurface id -> handle, gpu address, size */
+   SWEET_GPU_LOG = 7,    /* struct in: text for the kernel log */
 };
+
+/* fd_bo_from_handle(): an IOSurface id, not a SweetGPU buffer handle */
+#define SWEET_IOSURFACE_HANDLE 0x40000000u
 
 struct sweet_device {
    struct fd_device base;

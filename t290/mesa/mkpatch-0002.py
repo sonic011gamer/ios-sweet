@@ -74,7 +74,7 @@ osmesa_deps = []
 if host_machine.system() == 'darwin' and with_gallium_freedreno
   osmesa_c_args += '-DT290_SWEET'
   osmesa_deps += driver_freedreno
-  osmesa_link_args += ['-framework', 'IOKit', '-framework', 'CoreFoundation']
+  osmesa_link_args += ['-framework', 'IOKit', '-framework', 'CoreFoundation', '-framework', 'IOSurface']
 endif
 ''')
 edit('src/gallium/targets/osmesa/meson.build', '''  'osmesa_target.c',
