@@ -4,7 +4,51 @@
 (XNU + неизменённый userland iOS 16 на Redmi Note 10 Pro). Локальная копия:
 `D:\test1\ios-sweet`, его `NOTES.md` — подробный журнал того, как это делалось.
 
-## Active handoff 2026-10-22 (later): USB CDC screen/debug link, kernel 0131
+## Active handoff 2026-10-22 (evening): bridge7 — GPU UI artifacts and speed
+
+- User report on bridge6 + kernel 0131 (boot pulled to `ios-t290/logs/now/`):
+  GPU UI works but is slow, with many artifacts. Log: eagltest PASS, no GL
+  errors, no missing GLI slots, no GPU faults; GPU waits avg ~4 ms; display
+  is surface 1 (bpr 3200, padded to 3328 by the bridge, copied back by CPU).
+- Causes found in `t290/eagl/eaglshim.m` (bridge6):
+  1. Padded textures were refreshed from their IOSurface only on
+     glBindTexture. CA does not rebind a texture after another process
+     draws into the surface (zero-copy assumption) -> stale/missing images.
+  2. Every display flush compared the whole 800x1280 surface three times
+     (backing/snapshot/source) and copied changed rows, although CA redraws
+     only the damage rectangle.
+  3. Every draw/error check resolved Mesa functions by name
+     (OSMesaGetProcAddress = linear strcmp over the glapi table).
+  4. Padding used a 256-byte rule for all formats; Freedreno needs 64 px
+     (LA08: 128 bytes, A8/L8: 64), so some LA08/A8 surfaces were padded needlessly.
+- Commit 6bbe958 (bridge7): seed check of every bound padded texture before
+  each draw; GPU writes tracked as row ranges from viewport/scissor, only
+  those rows copied back (no snapshot); GL entry points cached; per-format
+  pitch; log line every 300 frames: fps, GPU wait, KB copied per frame.
+  eagltest adds: LA08 update without rebind, scissored redraw rows 10-19.
+- **EAGL CI 39765269483 PASSED** (iOS build; mac fake-GPU ES2/ES3 incl. the
+  new checks; fake GPU does not verify pixels). Artifacts `dl/eagl-bridge7`:
+  bridge 449488 bytes SHA256 a942fc24f92e009a2e43d28109c6ca91927409d58b082b7c33a0f28173554727,
+  eagltest 88720 bytes SHA256 47bdc2357451314e6d7f418e9d107c7d081817073bb46ba3ab638f048f85b4fc.
+- Previous request (bridge6) confirmed done 4/4. **New SD request STAGED, 4 ops:**
+  get `/private/var/tmp/t290eagl.log` -> `dl/eagl-bridge7/eagl6.before.log`,
+  get `/usr/lib/t290eagl-mesa.dylib` -> `dl/eagl-bridge7/bridge.before.dylib`,
+  put bridge7 as `/usr/lib/t290eagl-mesa.dylib`, put `/usr/bin/eagltest` (755).
+  Whole 34138256-byte request read back from the SD, SHA256 811fcaf7...0ab75 matches.
+  **Next:** user boots iPadOS (USB cable to the PC allows `t290/usb/viewer.py`
+  screenshots), checks UI after ~3 min, returns to Android; then pstore +
+  `t290-xfer.ps1 -Result`; look for the eagltest PASS lines and the
+  "fps over 300 frames" lines. Not verified on hardware yet.
+- Kernel-side follow-ups (NOT done, need CI + recovery flash approval):
+  IOSurface rows always 256-aligned (no padding at all -> zero-copy), display
+  surface 1 with bpr 3328 (GPU renders straight into the scanout surface),
+  cache maintenance per submitted buffer instead of all imported surfaces on
+  every submit/wait (`SweetGPU.cpp flush_surfaces`), GPU clock 200 MHz
+  (shim GPLL0/4; Android runs up to 650 MHz) — needs the GFX rail corner.
+- Separate stability issue seen in the bridge6 boot (`eagl6-console.bin`):
+  panic `recount.c:414 rsn_time_mach 0 >= ...` (non-monotonic time, cpus=4).
+
+## Handoff 2026-10-22 (later): USB CDC screen/debug link, kernel 0131
 
 - Patch 0131 (`t290/usb`, commit with "xnu 0131"): HSUSB/ChipIdea device
   mode as CDC ACM (VID 1209 PID 0001, "T290 Screen Debug"), commands F/L/I
