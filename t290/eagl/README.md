@@ -54,12 +54,21 @@ restore backboardd's ProgramArguments to `/usr/libexec/backboardd` using the
 SD file-transfer tool. Preserve the previous launchd cache and Mesa library
 before replacing them. No kernel/recovery reflash is needed with kernel 0129.
 
-Nonaligned rows use a padded GPU IOSurface. CPU row copies preserve the
-original stride; texture binds refresh CPU changes, and finish/flush/object
-fences wait for the GPU before copying results back. This is a conservative
-compatibility path with extra CPU work, pending hardware performance tests.
+Nonaligned rows use a padded GPU IOSurface. Texture/renderbuffer aliases
+share one Mesa EGL image per IOSurface/layout, so they see each other's GPU
+writes. CPU row copies preserve the original stride; texture binds refresh
+CPU images when IOSurfaceLock/Unlock advances their seed. Framebuffer writes
+mark the backing dirty. Finish/object fences publish dirty outputs after a
+GPU wait; ordinary flushes are asynchronous except for dirty display
+surface1, which the CPU framebuffer driver consumes immediately.
+This compatibility path still needs hardware performance validation.
 Aligned surfaces continue to import directly. PixelFormat0 scratch surfaces
 use the format supplied by the EAGL call.
+
+The pixel test checks aliases by rendering through a second texture name
+and checking the same IOSurface through the first object's fence. Throttled
+GL error diagnostics preserve error flags for GLI get_error callers. Logs
+also include time spent waiting, flush counts and draw counts.
 
 The bridge handles the IOSurface path observed in this firmware. Drawable
 renderbuffer allocation is not implemented; unsupported surface formats

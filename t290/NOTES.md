@@ -6,7 +6,35 @@
 
 ## Active handoff 2026-10-22: EAGL bridge
 
-### Latest result: kernel 0130 displays UI; surface-layout fixes in progress
+### Latest result: bridge5 real tests PASS, GUI still slow/incomplete
+
+- User booted bridge5 and reports slower-than-CPU UI, artifacts and missing
+  elements. Fresh logs `ios-t290/logs/eagl5-{console,head}.bin`. All4 SD ops
+  completed successfully; old log/bridge retrieved to `dl/eagl-bridge5`.
+- Bridge5 **real-device ES2 and ES3 tests PASS**, including all rows of
+  format0 120x120, BGRA800x1280, and LA08 samples127/127/127/255 then
+  63/63/63/128 after an update. Final testexit0. No compositor import
+  failures, missing GLI calls or GPU faults/timeouts observed in this log.
+  This does not imply correct composition or acceptable UI performance.
+- Concrete code problems: every flush became a full GPU wait and scanned
+  all padded surfaces; bindings compared whole CPU images. The same
+  surface65 was padded twice in backboardd, at independent texture names,
+  so aliases did not share image storage or GPU resource tracking.
+- Current fix: share a retained Mesa EGL image per IOSurface/layout within
+  the sharegroup, including direct imports; use IOSurface seed changes
+  from Lock/Unlock to refresh CPU images; track framebuffer GPU writes;
+  publish dirty padded outputs only. Flush is asynchronous except when
+  dirty display surface1 must be copied for the CPU framebuffer driver.
+  Repeated object fences reuse a completed wait when no new work occurred.
+- Regression test now aliases the same IOSurface through two texture names,
+  renders green through the second and checks CPU pixels through the first
+  object's fence. It would fail with bridge5's separate shadows. LA08 CPU
+  updates now use IOSurfaceLock/Unlock, exercising the seed protocol.
+- Added throttled GL error diagnostics (pending errors preserved for callers)
+  and wait-time/flush/draw counters for the next actual compositor run.
+  Hardware performance/correctness of these changes is still pending.
+
+### Previous bridge5 preparation
 
 - User reports that an image appears with kernel 0130, but the UI is broken,
   incomplete and freezes. Fresh pstore pulled from connected Android:

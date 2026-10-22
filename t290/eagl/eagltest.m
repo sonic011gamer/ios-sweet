@@ -77,6 +77,27 @@ static int test_row_layouts(id ctx, struct Macro *m)
         }
         printf("PASS output %ux%u fmt %#x stride %zu, object fence and all rows\n",
             widths[c], heights[c], formats[c], stride);
+        /* Two texture names must share the same IOSurface storage. The
+         * old per-texture shadows returned red/old pixels through tex1
+         * after tex2 rendered into a separate shadow of the same surface. */
+        GLuint alias = 0;
+        CALL(98, void, (void *, GLsizei, GLuint *), 1, &alias);
+        CALL(5, void, (void *, GLenum, GLuint), 0x0de1, alias);
+        if (![ctx attachImage:0x0de1 toCoreSurface:s invertedRender:NO]) return 26;
+        CALL(677, void, (void *, GLenum, GLenum, GLenum, GLuint, GLint), 0x8d40, 0x8ce0, 0x0de1, alias, 0);
+        CALL(12, void, (void *, GLfloat, GLfloat, GLfloat, GLfloat), 0, 1, 0, 1);
+        CALL(10, void, (void *, GLbitfield), 0x4000);
+        CALL(470, void, (void *, GLenum, GLuint), 0x1702, tex);
+        if (CALL(102, GLenum, (void *))) return 27;
+        if (!getenv("SWEET_FAKE")) {
+            const uint8_t *p = IOSurfaceGetBaseAddress(s);
+            for (size_t y = 0; y < heights[c]; y++) for (size_t x = 0; x < widths[c]; x++) {
+                const uint8_t *q = p + y * stride + x * 4;
+                if (q[0] || q[1] != 255 || q[2] || q[3] != 255) return 28;
+            }
+        }
+        printf("PASS shared IOSurface storage across two texture names\n");
+        CALL(59, void, (void *, GLsizei, const GLuint *), 1, &alias);
         CALL(673, void, (void *, GLsizei, const GLuint *), 1, &fbo);
         CALL(59, void, (void *, GLsizei, const GLuint *), 1, &tex);
         CFRelease(s);
@@ -121,6 +142,7 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
     CALL(672, void, (void *, GLenum, GLuint), 0x8d40, targetFbo);
     CALL(335, void, (void *, GLint, GLint, GLsizei, GLsizei), 0, 0, 64, 64);
     for (unsigned round = 0; round < 2; round++) {
+        if (IOSurfaceLock(s, 0, NULL)) return 36;
         uint8_t *p = IOSurfaceGetBaseAddress(s);
         size_t stride = IOSurfaceGetBytesPerRow(s);
         int lum = round ? 63 : 127, alpha = round ? 128 : 255;
@@ -128,6 +150,7 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
             p[y * stride + x * 2] = lum;
             p[y * stride + x * 2 + 1] = alpha;
         }
+        if (IOSurfaceUnlock(s, 0, NULL)) return 37;
         CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
         CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
         CALL(90, void, (void *));
