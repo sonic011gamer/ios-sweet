@@ -69,7 +69,7 @@ index 0000000..25f7abe
 +#define TLMM_SDC2_PHYS          0xFD512000UL    /* TLMM page containing SDC2_HDRV_PULL_CTL */
 +#define SMEM_PHYS               0x06A00000UL    /* MSM_SHARED_BASE */
 +#define SMEM_SIZE               0x100000UL
-+#define RPM_MSG_PHYS            0x06800000UL    /* Standard MSM8994 MSG RAM, update if SMEM layout differs */
++#define RPM_MSG_PHYS            0xFC428000UL    /* msm8994 RPM message RAM (SMEM aux base, 0xfc428000/0x4000) */
 +#define RPM_MSG_SIZE            0x8000UL
 +#define APCS_IPC_PHYS           0xF900D000UL    /* APCS_ALIAS0_IPC_INTERRUPT page */
 +
