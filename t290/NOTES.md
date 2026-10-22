@@ -33,6 +33,23 @@
   rows, avoiding full-display copies for every small image fence.
   CI 39742295266 iOS build/mac smoke passed; layout job still pending when
   checked. Corrected signed tolerance arithmetic in the LA08 pixel check.
+- **Final CI 39742477239 PASSED**, commit ca94264: all jobs including the
+  iOS build and mac fake ES2/ES3 regression tests. These tests report GL
+  error0 for both LA08 updates and exercise strides480/3200, but fake GPU
+  does not verify rendered pixels. Device artifacts `dl/eagl-bridge5`:
+  bridge426240 bytes SHA256 b3f1e7de6cdbb11324498da53cc29a43431397eaca11d1265c8c5f7d84839571;
+  test88608 bytes SHA256 e402943b33a0e68e584f6acb1faf29b301b19fef6176871e428238cc04b9e353.
+- Previous SD request confirmed done2/2. **New request STAGED: 4 ops**,
+  get previous `/private/var/tmp/t290eagl.log` to
+  `dl/eagl-bridge5/eagl0130.before.log`, get previous active bridge to
+  `dl/eagl-bridge5/bridge.before.dylib`, then put updated
+  `/usr/lib/t290eagl-mesa.dylib` and `/usr/bin/eagltest`. Entire 34115104-byte
+  raw SD request read back from device and SHA256-verified:
+  47d49628d5ff3132954e49af0ae6a8add0f8a31a010b34b1d29ad91a51ef1175.
+  Files apply on the next iPadOS boot before the launcher guard runs.
+  Recovery0130 and Mesa libraries are unchanged. User was asked to boot
+  manually, inspect UI after ~3 minutes and return to Android. **Next:
+  read fresh pstore and xfer -Result; new hardware results still pending.**
 
 ### Earlier kernel-0130 preparation and installation
 
