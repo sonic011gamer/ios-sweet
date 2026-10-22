@@ -25,6 +25,10 @@
   code, but whether it explains the reported artifacts needs a device test.
   Direct presentation clears a pending redraw and mutes the console too.
   Actual SwapEnd/convert timing now logs every 300 swaps for both buffers.
+- Additional concrete graphics bug: display-off fade wrote into fPixels,
+  the GPU shadow, destroying retained CA pixels. On T290 the fade now only
+  changes the packed physical panel, under the USB capture lock. The GPU
+  surfaces survive lock/unlock for subsequent damage-only redraws.
 - Local XNU compile of the changed framebuffer source PASS (0/1 failures),
   buildtree `/home/kirill/fps0135`, based on cached source plus 0133/0134.
   Generator `t290/display/mkpatch.py` takes the post-0134 framebuffer source.
