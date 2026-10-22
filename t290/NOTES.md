@@ -11,11 +11,29 @@
   for both ES3 and ES2. The GUI is still software rendered.
 - Kernel 0129 already supports IOSurface imports and 256-byte row alignment.
   Mesa run 39729025501 failed: missing prototypes for OSMesaT290CreateImage /
-  DestroyImage. Fixing these and adding real GLES contexts (patch 0004).
-- Work in progress: typed GLI dispatch adapters and a Mesa-backed EAGL object.
-  This is not yet a verified GPU-accelerated GUI. Keep the existing probe and
-  launchd rollback (`/private/var/tmp/t290launch.off`) available.
-- Device observed in rooted Android; no partitions changed in this session.
+  DestroyImage. Fixed in 4b07e1a, with real GLES contexts in patch 0004 and the
+  shared libglapi runtime. **Mesa CI 39734142174 passed** (both jobs).
+- Bridge in commits 5b07c6e / 6eba320: 975 typed GLI adapters, real GLES
+  contexts, ARB shader adapters, IOSurface textures/renderbuffers. Keep the
+  original observation probe separately. See `t290/eagl/README.md`.
+- **EAGL CI 39735351364 passed** (6ebb7cc): iOS build and macOS smoke test
+  with fake GPU. ES2/ES3 contexts report FD504, FBO 0x8cd5, shaders compile
+  and draw commands generate without GL errors. Fake tests DO NOT verify
+  GPU execution or pixels. Earlier iOS bridge build 39734954270 also passed.
+- Local Mesa artifacts: `D:/test1/dl/mesa-eagl1/out`; initial bridge artifacts
+  `D:/test1/dl/eagl-bridge1` (39734954270, clear-only test). The newer test
+  additionally draws a triangle; it is not staged on the tablet yet.
+- Staged 7-op SD transfer: get old `/System/Library/xpc/launchd.plist` and
+  `/usr/lib/libOSMesa.8.dylib` to `dl/eagl-bridge1/*.before.*`; put new Mesa,
+  libglapi, `/usr/lib/t290eagl-mesa.dylib`, `/usr/bin/eagltest`, and a launchd
+  cache that runs the test once. Backboardd runs without the old verbose
+  probe for this test. Existing `/usr/lib/t290eagl.dylib` stays untouched.
+- User asked to boot iPadOS for ~3 minutes, then return to Android. Last
+  observation: adb device absent (possible iPadOS test in progress). Read
+  pstore and run `t290/tools/t290-xfer.ps1 -Result` when Android returns.
+- GPU GUI still UNVERIFIED. Do not describe it as accelerated until the
+  compositor runs through this bridge on the actual tablet. No partitions
+  flashed in this session; only the SD file-transfer request was staged.
 
 ## Handoff 2026-10-21 (вечер)
 
