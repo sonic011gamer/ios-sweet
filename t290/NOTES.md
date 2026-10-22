@@ -6,6 +6,32 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **CURRENT sole Actions run: 39788991320 (67a1508), Intel, XNU Build still
+  in progress at the latest user status request.** Its t290-graphics job
+  failed linking the iOS bridge: new ld forbids interpose tuples in a dylib
+  it considers shared-cache eligible. Commit 2cee828 fixes both iOS/host
+  link lines with `-Wl,-not_for_dyld_shared_cache`; not rebuilt yet.
+  Current kernel compilation is being allowed to finish, not restarted.
+- Previous Intel run 39787534608 reached IIG but failed because the DXB
+  Python venv is 3.9: Path.write_text(newline=...) is unsupported there.
+  67a1508 uses open(..., newline=...) instead; that run is deleted and the
+  full old log is saved locally as actions-cleanup/intel-kernel2-failed.log.
+  The current run continues to use the same verified Xcode-15 IIG cache.
+- Kernel and graphics now share one workflow run, with separate Intel jobs.
+  Graphics builds its own host Mesa instead of querying deleted CI history.
+  Once the current kernel job succeeds, download its xnu-kernel artifact,
+  verify SHA256, and run the fixed workflow with kernel_artifact_run=
+  39788991320 and kernel_artifact_sha256=<verified hash>, runner=macos-15-intel,
+  sweet_board=t290. This avoids recompiling the same kernel for a linker
+  flag fix. The reuse step checks unchanged xnu/patches + iig-cache.py,
+  same DXB SHA and the supplied kernel checksum. After the new run has
+  downloaded/re-uploaded that artifact, remove the previous run so the
+  user's requested single-run history is retained. Do not delete the only
+  remote kernel artifact before the new run retrieves it.
+- If the current kernel job fails, inspect its actual compiler/linker errors
+  and fix them; do not pass an incomplete artifact to the reuse path.
+  No image/bridge staged and no partition written during this recovery.
+
 - **Intel fallback now running:** XNU **39787534608**, commit 2dce1a2,
   `runner=macos-15-intel`, `sweet_board=t290`. Compatible-cache download and
   Fetch build script both PASS; last observed step Deps in progress. Preserve
