@@ -62,6 +62,37 @@ sweet_pipe_destroy(struct fd_pipe *pipe)
    free(to_sweet_pipe(pipe));
 }
 
+/*
+ * Imported IOSurfaces are CPU-cached memory the GPU does not snoop. Tell the
+ * kernel which buffers this submit uses so it cleans/invalidates only those
+ * (kernel 0133); older kernels flush every imported surface on each call.
+ */
+static void
+prepare_bos(struct sweet_device *sd, struct list_head *submit_list)
+{
+   uint32_t handles[1024];
+   unsigned n = 0;
+
+   if (sd->no_prepare || sd->conn == SWEET_FAKE_CONN)
+      return;
+   foreach_submit (submit, submit_list) {
+      struct fd_submit_sp *s = to_fd_submit_sp(submit);
+      for (unsigned i = 0; i < s->nr_bos; i++) {
+         if (n == ARRAY_SIZE(handles)) {
+            if (IOConnectCallStructMethod(sd->conn, SWEET_GPU_PREPARE, handles,
+                                          n * 4, NULL, NULL)) {
+               sd->no_prepare = true;
+               return;
+            }
+            n = 0;
+         }
+         handles[n++] = s->bos[i]->handle;
+      }
+   }
+   if (n && IOConnectCallStructMethod(sd->conn, SWEET_GPU_PREPARE, handles, n * 4, NULL, NULL))
+      sd->no_prepare = true;
+}
+
 static int
 flush_submit_list(struct list_head *submit_list)
 {
@@ -70,6 +101,8 @@ flush_submit_list(struct list_head *submit_list)
    struct sweet_device *sd = to_sweet_device(pipe->dev);
    uint64_t seq = 0;
    int ret = 0;
+
+   prepare_bos(sd, submit_list);
 
    foreach_submit_safe (submit, submit_list) {
       struct fd_ringbuffer_sp *primary = to_fd_ringbuffer_sp(submit->primary);

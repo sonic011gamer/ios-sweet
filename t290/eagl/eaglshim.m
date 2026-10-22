@@ -205,7 +205,7 @@ static inline void image_mark(T290SurfaceImage *img, size_t y0, size_t y1)
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, T290SurfaceImage *> *renderbuffers;
 @property(nonatomic, strong) NSMapTable<NSString *, T290SurfaceImage *> *surfaces;
 @property(nonatomic, strong) NSMutableSet<T290SurfaceImage *> *dirty;   /* padded, GPU-written */
-@property(nonatomic, weak) T290SurfaceImage *display;                  /* padded surface 1 */
+@property(nonatomic, weak) T290SurfaceImage *display;                  /* surface 1 (scanout) */
 @property(nonatomic, strong) NSMutableIndexSet *mipmapped;             /* textures with levels > 0 */
 @end
 @implementation T290Sharegroup
@@ -398,7 +398,7 @@ static void t290_flush(void)
 static void update_draw_image(T290Context *ctx)
 {
     T290SurfaceImage *img = ctx->_framebuffers[@(ctx->_drawFbo)];
-    ctx->_drawImage = img && img->backing ? img : nil;
+    ctx->_drawImage = img && (img->backing || img == ctx.sharegroup.display) ? img : nil;
 }
 static void t290_bind_framebuffer(GLenum target, GLuint name)
 {
@@ -842,7 +842,10 @@ static uintptr_t unsupported_private(void *ctx, ...)
             _framebuffers[fbo] = mirror;
     update_draw_image(self);
     if (target == 0x0de1) bind_unit(self, (GLuint)name, mirror);
-    if (mirror->backing && IOSurfaceGetID(surface) == 1) _sharegroup.display = mirror;
+    /* the scanout surface: the framebuffer driver reads it right after the
+     * flush, so that flush waits for the GPU (zero-copy with kernel 0133,
+     * padded with older kernels) */
+    if (IOSurfaceGetID(surface) == 1) _sharegroup.display = mirror;
     static unsigned count;
     if (count++ < 12) plog("t290eagl: imported surface %u %dx%d target %#x invert %d",
         IOSurfaceGetID(surface), w, h, target, invert);

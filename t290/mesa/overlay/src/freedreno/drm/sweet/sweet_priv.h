@@ -25,6 +25,8 @@ kern_return_t IOServiceClose(io_connect_t connect);
 kern_return_t IOObjectRelease(io_object_t object);
 kern_return_t IOConnectCallScalarMethod(io_connect_t c, uint32_t sel, const uint64_t *in, uint32_t nin,
                                         uint64_t *out, uint32_t *nout);
+kern_return_t IOConnectCallStructMethod(io_connect_t c, uint32_t sel, const void *in, size_t nin,
+                                        void *out, size_t *nout);
 kern_return_t IOConnectMapMemory64(io_connect_t c, uint32_t type, task_port_t task,
                                    mach_vm_address_t *addr, mach_vm_size_t *size, uint32_t options);
 kern_return_t IOConnectUnmapMemory64(io_connect_t c, uint32_t type, task_port_t task,
@@ -40,6 +42,7 @@ enum {
    SWEET_GPU_FENCE = 5,  /* -> last completed seq */
    SWEET_GPU_IMPORT_SURFACE = 6, /* IOSurface id -> handle, gpu address, size */
    SWEET_GPU_LOG = 7,    /* struct in: text for the kernel log */
+   SWEET_GPU_PREPARE = 8, /* struct in: u32 handles of the next submit (cache upkeep) */
 };
 
 /* fd_bo_from_handle(): an IOSurface id, not a SweetGPU buffer handle */
@@ -51,6 +54,7 @@ struct sweet_device {
    uint64_t chip_id;
    uint32_t gmem_size;
    uint32_t last_seq;    /* last submitted kernel fence */
+   bool no_prepare;      /* kernel without SWEET_GPU_PREPARE: it flushes everything */
 };
 FD_DEFINE_CAST(fd_device, sweet_device);
 
