@@ -3,6 +3,7 @@
 #include "surface.h"
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "gl_types.h"
@@ -18,7 +19,22 @@
 struct Macro { void *renderer; void *slots[1100]; };
 #define CALL(slot, ret, types, ...) ((ret (*) types)m->slots[slot])(m->renderer, ##__VA_ARGS__)
 
-int main(void)
+static int tlog(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static int tlog(const char *format, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, format);
+    int n = vsnprintf(buf, sizeof(buf), format, ap);
+    va_end(ap);
+    fputs(buf, stdout);
+    void (*report)(const char *) = dlsym(RTLD_DEFAULT, "T290EAGLLog");
+    if (report) report(buf);
+    return n;
+}
+#define printf tlog
+
+static int test_main(void)
 {
     @autoreleasepool {
         /* macOS has no EAGLContext: exercise the same implementation directly. */
@@ -113,4 +129,13 @@ int main(void)
             getenv("SWEET_FAKE") ? " (fake GPU; pixels not verified)" : " and GPU pixels");
     }
     return 0;
+}
+
+int main(void)
+{
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    int result = test_main();
+    printf("EAGL test exit %d\n", result);
+    return result;
 }

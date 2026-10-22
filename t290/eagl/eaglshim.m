@@ -51,6 +51,10 @@ static void plog(const char *fmt, ...)
         write(log_fd, buf, n);
 }
 
+/* Diagnostics from the standalone test must survive unavailable stdio. */
+void T290EAGLLog(const char *message);
+void T290EAGLLog(const char *message) { plog("eagltest: %s", message); }
+
 @interface T290Sharegroup : NSObject
 @property(nonatomic, assign) void *root;
 @end
