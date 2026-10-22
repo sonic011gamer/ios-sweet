@@ -237,4 +237,11 @@ NULL+0x30 when CA read the EDR factor. Logs: ios-t290/logs/eagl3-*.bin.
 Bridge4 returns NULL for the optional IOSurfaceWrapClientImage path, so CA
 can use its existing GL texture-upload path. Patch 0130 fixes the kernel
 reply to kIOReturnUnsupported. See t290/NOTES.md for current staged files,
-CI IDs and device test status. GPU-accelerated GUI remains unverified.
+CI IDs and device test status.
+
+Kernel 0130 now displays an image and removes the previous backboardd
+SIGSEGV. User reports incomplete/broken UI and freezes. New pstore shows
+failed imports of format0 scratch images, BGRA800x1280/stride3200 and
+LA08 sources with unaligned rows, plus missing finish_object_APPLE.
+The bridge is being extended with padded IOSurface copies and a real
+presentation wait; a usable GPU-accelerated GUI remains unverified.

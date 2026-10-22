@@ -6,7 +6,29 @@
 
 ## Active handoff 2026-10-22: EAGL bridge
 
-### Latest result: GPU pixel tests PASS; compositor needs kernel 0130
+### Latest result: kernel 0130 displays UI; surface-layout fixes in progress
+
+- User reports that an image appears with kernel 0130, but the UI is broken,
+  incomplete and freezes. Fresh pstore pulled from connected Android:
+  `ios-t290/logs/eagl0130-{console,head}.bin`. Both GPU pixel tests still
+  PASS; backboardd creates ES3, submits draws and swaps surface 1. The old
+  backboardd SIGSEGV is absent. No GPU timeout/fault observed in these logs.
+- Concrete failures: format-less CA scratch surfaces 120x120/stride480,
+  40x40/160 and 266x75/1064; BGRA display surface 1 800x1280/3200;
+  LA08 source images 228x162/480 and 900x150/1824. Freedreno rejects rows
+  not aligned to its import requirements. GLI slot470 finish_object_APPLE
+  is also missing, so CA's wait before presentation does nothing.
+- Bridge fix being built: infer missing pixel format from EAGL arguments;
+  pad incompatible rows in a retained IOSurface, preserve packed original
+  rows with CPU upload/publish copies, refresh CPU updates on texture bind,
+  and implement finish_object_APPLE/flush as a real GPU wait plus publish.
+  Direct aligned imports remain unchanged. Additional CPU copies and full
+  waits are conservative; smoothness remains unverified on hardware.
+- Regression test now covers format0 120x120, BGRA800x1280 with object-fence
+  output/all rows, and LA08 228x162 sampling plus a later CPU update. Both
+  ES2/ES3 run these cases before backboardd can use the new bridge.
+
+### Earlier kernel-0130 preparation and installation
 
 - Boot with bridge3 completed all 5 SD operations. `eagltest` reported ES2
   and ES3 renderer FD504, FBO 0x8cd5, clear BGRA 191/128/64/255, triangle

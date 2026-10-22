@@ -81,8 +81,56 @@ static const struct { const void *replacement, *original; } surface_interpose[] 
 };
 #endif
 
+/* Adreno imports require aligned rows. Preserve the caller's IOSurface
+ * layout with a padded GPU surface, copying rows at the CPU/GPU boundary.
+ * This also covers CA's format-less scratch surfaces (format supplied by
+ * the EAGL call). The GL texture still renders and samples on the GPU. */
+@interface T290SurfaceImage : NSObject {
+@public
+    IOSurfaceRef source, backing;
+    size_t rows, rowBytes, sourceStride, backingStride;
+    NSMutableData *snapshot;
+}
+- (BOOL)sourceChanged;
+- (void)upload;
+- (void)publish;
+@end
+@implementation T290SurfaceImage
+- (BOOL)sourceChanged
+{
+    const uint8_t *p = IOSurfaceGetBaseAddress(source), *saved = snapshot.bytes;
+    for (size_t y = 0; y < rows; y++)
+        if (memcmp(p + y * sourceStride, saved + y * rowBytes, rowBytes)) return YES;
+    return NO;
+}
+- (void)upload
+{
+    const uint8_t *p = IOSurfaceGetBaseAddress(source);
+    uint8_t *q = IOSurfaceGetBaseAddress(backing), *saved = snapshot.mutableBytes;
+    for (size_t y = 0; y < rows; y++) {
+        memcpy(q + y * backingStride, p + y * sourceStride, rowBytes);
+        memcpy(saved + y * rowBytes, p + y * sourceStride, rowBytes);
+    }
+}
+- (void)publish
+{
+    /* An independent CPU update after the last bind belongs to the next
+     * upload. Do not overwrite it with an older GPU copy. */
+    if ([self sourceChanged]) return;
+    uint8_t *p = IOSurfaceGetBaseAddress(source), *saved = snapshot.mutableBytes;
+    const uint8_t *q = IOSurfaceGetBaseAddress(backing);
+    for (size_t y = 0; y < rows; y++) {
+        memcpy(p + y * sourceStride, q + y * backingStride, rowBytes);
+        memcpy(saved + y * rowBytes, q + y * backingStride, rowBytes);
+    }
+}
+- (void)dealloc { if (source) CFRelease(source); if (backing) CFRelease(backing); }
+@end
+
 @interface T290Sharegroup : NSObject
 @property(nonatomic, assign) void *root;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, T290SurfaceImage *> *textures;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, T290SurfaceImage *> *renderbuffers;
 @end
 @implementation T290Sharegroup
 - (void)dealloc { if (_root) mesa_destroy(_root); }
@@ -167,9 +215,45 @@ static const GLubyte *t290_get_string(GLenum name)
 static void t290_finish(void)
 {
     GLFN("glFinish", void, (void))();
+    T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
+    for (T290SurfaceImage *img in ctx.sharegroup.textures.allValues) [img publish];
+    for (T290SurfaceImage *img in ctx.sharegroup.renderbuffers.allValues) [img publish];
     static unsigned count;
     unsigned n = __atomic_add_fetch(&count, 1, __ATOMIC_RELAXED);
-    if (n <= 3 || n % 1000 == 0) plog("t290eagl: GPU finish %u", n);
+    if (n <= 3 || n % 120 == 0) plog("t290eagl: GPU finish %u", n);
+}
+
+static void t290_finish_object(GLenum object, GLuint name)
+{
+    /* Apple's object fence is used before CA presents an IOSurface.
+     * A full wait is conservative and also completes padded-row copies. */
+    t290_finish();
+}
+static void t290_bind_texture(GLenum target, GLuint name)
+{
+    GLFN("glBindTexture", void, (GLenum, GLuint))(target, name);
+    T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
+    T290SurfaceImage *img = target == 0x0de1 ? ctx.sharegroup.textures[@(name)] : nil;
+    if (img && [img sourceChanged]) {
+        GLFN("glFinish", void, (void))();
+        [img upload];
+    }
+}
+static void t290_delete_textures(GLsizei n, const GLuint *names)
+{
+    T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
+    for (GLsizei i = 0; i < n; i++)
+        if (ctx.sharegroup.textures[@(names[i])]) { t290_finish(); break; }
+    for (GLsizei i = 0; i < n; i++) [ctx.sharegroup.textures removeObjectForKey:@(names[i])];
+    GLFN("glDeleteTextures", void, (GLsizei, const GLuint *))(n, names);
+}
+static void t290_delete_renderbuffers(GLsizei n, const GLuint *names)
+{
+    T290Context *ctx = (__bridge T290Context *)pthread_getspecific(current_key);
+    for (GLsizei i = 0; i < n; i++)
+        if (ctx.sharegroup.renderbuffers[@(names[i])]) { t290_finish(); break; }
+    for (GLsizei i = 0; i < n; i++) [ctx.sharegroup.renderbuffers removeObjectForKey:@(names[i])];
+    GLFN("glDeleteRenderbuffers", void, (GLsizei, const GLuint *))(n, names);
 }
 
 #include "dispatch_generated.h"
@@ -189,6 +273,8 @@ static uintptr_t unsupported_private(void *ctx, ...)
         group = [T290Sharegroup new];
         group.root = mesa_create(api, NULL);
         if (!group.root) return nil;
+        group.textures = [NSMutableDictionary dictionary];
+        group.renderbuffers = [NSMutableDictionary dictionary];
     }
     _sharegroup = group;
     _API = api;
@@ -229,8 +315,59 @@ static uintptr_t unsupported_private(void *ctx, ...)
     size_t stride = planes ? IOSurfaceGetBytesPerRowOfPlane(surface, plane) : IOSurfaceGetBytesPerRow(surface);
     uintptr_t offset = planes ? (uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface, plane) -
         (uintptr_t)IOSurfaceGetBaseAddress(surface) : 0;
-    void *image = mesa_image(IOSurfaceGetID(surface), w, h, (uint32_t)stride,
-        (uint32_t)offset, IOSurfaceGetPixelFormat(surface));
+    uint32_t fourcc = IOSurfaceGetPixelFormat(surface);
+    if (!fourcc) {
+        /* CA scratch buffers omit PixelFormat. The EAGL arguments carry
+         * its format; attachImage's legacy default is RGBA/UNSIGNED_BYTE. */
+        if (format == 0x1906) fourcc = 0x41303038;
+        else if (format == 0x1909) fourcc = 0x4c303038;
+        else if (format == 0x190a) fourcc = 0x4c413038;
+        else if (format == 0x80e1) fourcc = 0x42475241;
+        else if (format == 0x1908 && type == 0x1401) fourcc = 0x52474241;
+    }
+    GLint name = 0;
+    GLFN("glGetIntegerv", void, (GLenum, GLint *))(target == 0x8d41 ? 0x8ca7 : 0x8069, &name);
+    NSMutableDictionary *images = target == 0x8d41 ? _sharegroup.renderbuffers : _sharegroup.textures;
+    T290SurfaceImage *mirror = nil;
+    IOSurfaceRef imported = surface;
+    if (!planes && (stride & 255)) {
+        size_t bpe = fourcc == 0x4c413038 ? 2 :
+            (fourcc == 0x4c303038 || fourcc == 0x41303038) ? 1 :
+            (fourcc == 0x42475241 || fourcc == 0x52474241) ? 4 : 0;
+        if (!bpe || w <= 0 || h <= 0 || (size_t)w > SIZE_MAX / bpe ||
+            (size_t)h > IOSurfaceGetHeight(surface) || (size_t)w * bpe > stride) return NO;
+        mirror = images[@(name)];
+        if (mirror && (mirror->source != surface || mirror->rowBytes != (size_t)w * bpe ||
+                       mirror->rows != (size_t)h)) mirror = nil;
+        if (!mirror) {
+            mirror = [T290SurfaceImage new];
+            mirror->source = (IOSurfaceRef)CFRetain(surface);
+            mirror->rows = h;
+            mirror->rowBytes = (size_t)w * bpe;
+            mirror->sourceStride = stride;
+            mirror->backing = IOSurfaceCreate((__bridge CFDictionaryRef)@{
+                (__bridge id)kIOSurfaceWidth: @(w), (__bridge id)kIOSurfaceHeight: @(h),
+                (__bridge id)kIOSurfaceBytesPerElement: @(bpe),
+                (__bridge id)kIOSurfaceBytesPerRow: @((mirror->rowBytes + 255) & ~(size_t)255),
+                (__bridge id)kIOSurfacePixelFormat: @(fourcc), (__bridge id)kIOSurfaceIsGlobal: @YES
+            });
+            if (!mirror->backing) return NO;
+            mirror->backingStride = IOSurfaceGetBytesPerRow(mirror->backing);
+            if (mirror->backingStride & 255) return NO;
+            mirror->snapshot = [NSMutableData dataWithLength:mirror->rowBytes * mirror->rows];
+            [mirror upload];
+            plog("t290eagl: padded surface %u %dx%d fmt %#x stride %zu -> %zu",
+                IOSurfaceGetID(surface), w, h, fourcc, stride, mirror->backingStride);
+        } else if ([mirror sourceChanged]) {
+            GLFN("glFinish", void, (void))();
+            [mirror upload];
+        }
+        imported = mirror->backing;
+        stride = mirror->backingStride;
+        offset = 0;
+    }
+    void *image = mesa_image(IOSurfaceGetID(imported), w, h, (uint32_t)stride,
+        (uint32_t)offset, fourcc);
     if (!image) {
         plog("t290eagl: import FAILED id %u %dx%d stride %zu fourcc %#x plane %u",
             IOSurfaceGetID(surface), w, h, stride, (unsigned)IOSurfaceGetPixelFormat(surface), plane);
@@ -240,6 +377,10 @@ static uintptr_t unsupported_private(void *ctx, ...)
     void (*bind)(GLenum, void *) = (void (*)(GLenum, void *))mesa_proc(fn);
     if (bind) bind(target, image);
     mesa_image_destroy(image);
+    if (bind) {
+        if (mirror) images[@(name)] = mirror;
+        else [images removeObjectForKey:@(name)];
+    }
     static unsigned count;
     if (count++ < 12) plog("t290eagl: imported surface %u %dx%d target %#x invert %d",
         IOSurfaceGetID(surface), w, h, target, invert);

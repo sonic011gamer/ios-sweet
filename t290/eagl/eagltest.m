@@ -35,6 +35,119 @@ static int tlog(const char *format, ...)
 }
 #define printf tlog
 
+/* Actual failing layouts from the kernel-0130 compositor log. Exercise
+ * output copies through Apple's object fence, not just glFinish. */
+static int test_row_layouts(id ctx, struct Macro *m)
+{
+    const unsigned widths[] = {120, 800};
+    const unsigned heights[] = {120, 1280};
+    const uint32_t formats[] = {0, 0x42475241};
+    for (unsigned c = 0; c < 2; c++) {
+        IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)@{
+            (__bridge id)kIOSurfaceWidth: @(widths[c]), (__bridge id)kIOSurfaceHeight: @(heights[c]),
+            (__bridge id)kIOSurfaceBytesPerElement: @4,
+            (__bridge id)kIOSurfaceBytesPerRow: @(widths[c] * 4),
+            (__bridge id)kIOSurfacePixelFormat: @(formats[c]), (__bridge id)kIOSurfaceIsGlobal: @YES
+        });
+        if (!s) return 20;
+        size_t stride = IOSurfaceGetBytesPerRow(s);
+        memset(IOSurfaceGetBaseAddress(s), 0x5a, stride * heights[c]);
+        GLuint tex = 0, fbo = 0;
+        CALL(98, void, (void *, GLsizei, GLuint *), 1, &tex);
+        CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
+        if (![ctx attachImage:0x0de1 toCoreSurface:s invertedRender:NO]) return 21;
+        CALL(674, void, (void *, GLsizei, GLuint *), 1, &fbo);
+        CALL(672, void, (void *, GLenum, GLuint), 0x8d40, fbo);
+        CALL(677, void, (void *, GLenum, GLenum, GLenum, GLuint, GLint), 0x8d40, 0x8ce0, 0x0de1, tex, 0);
+        if (CALL(675, GLenum, (void *, GLenum), 0x8d40) != 0x8cd5) return 22;
+        CALL(12, void, (void *, GLfloat, GLfloat, GLfloat, GLfloat), 0.25f, 0.5f, 0.75f, 1.0f);
+        CALL(10, void, (void *, GLbitfield), 0x4000);
+        CALL(470, void, (void *, GLenum, GLuint), 0x1702, tex);
+        if (CALL(102, GLenum, (void *))) return 23;
+        const uint8_t *p = IOSurfaceGetBaseAddress(s);
+        if (!getenv("SWEET_FAKE")) {
+            for (size_t y = 0; y < heights[c]; y++) {
+                for (size_t x = 0; x < widths[c]; x++) {
+                    const uint8_t *q = p + y * stride + x * 4;
+                    if (abs(q[0] - (c ? 191 : 64)) > 1 || abs(q[1] - 128) > 1 ||
+                        abs(q[2] - (c ? 64 : 191)) > 1 || q[3] != 255) return 24;
+                }
+                for (size_t x = widths[c] * 4; x < stride; x++) if (p[y * stride + x] != 0x5a) return 25;
+            }
+        }
+        printf("PASS output %ux%u fmt %#x stride %zu, object fence and all rows\n",
+            widths[c], heights[c], formats[c], stride);
+        CALL(673, void, (void *, GLsizei, const GLuint *), 1, &fbo);
+        CALL(59, void, (void *, GLsizei, const GLuint *), 1, &tex);
+        CFRelease(s);
+    }
+    return 0;
+}
+
+static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
+{
+    IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)@{
+        (__bridge id)kIOSurfaceWidth: @228, (__bridge id)kIOSurfaceHeight: @162,
+        (__bridge id)kIOSurfaceBytesPerElement: @2, (__bridge id)kIOSurfaceBytesPerRow: @480,
+        (__bridge id)kIOSurfacePixelFormat: @0x4c413038, (__bridge id)kIOSurfaceIsGlobal: @YES
+    });
+    if (!s) return 30;
+    GLuint tex = 0;
+    CALL(98, void, (void *, GLsizei, GLuint *), 1, &tex);
+    CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
+    if (![ctx attachImage:0x0de1 toCoreSurface:s invertedRender:NO]) return 31;
+    CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2801, 0x2600);
+    CALL(304, void, (void *, GLenum, GLenum, GLint), 0x0de1, 0x2800, 0x2600);
+    const char *sources[] = {
+        "attribute vec2 position; varying vec2 uv; void main(){uv=position*0.5+0.5;gl_Position=vec4(position,0.0,1.0);}",
+        "precision mediump float; varying vec2 uv; uniform sampler2D image; void main(){gl_FragColor=texture2D(image,uv);}"
+    };
+    GLuint shaders[2], program = CALL(597, GLuint, (void *));
+    for (unsigned j = 0; j < 2; j++) {
+        shaders[j] = CALL(594, GLuint, (void *, GLenum), j ? 0x8b30 : 0x8b31);
+        CALL(595, void, (void *, GLuint, GLsizei, const char *const *, const GLint *), shaders[j], 1, &sources[j], NULL);
+        CALL(596, void, (void *, GLuint), shaders[j]);
+        GLint ok = 0;
+        CALL(622, void, (void *, GLuint, GLenum, GLint *), shaders[j], 0x8b81, &ok);
+        if (!ok) return 32;
+        CALL(598, void, (void *, GLuint, GLuint), program, shaders[j]);
+    }
+    CALL(630, void, (void *, GLuint, GLuint, const char *), program, 0, "position");
+    CALL(599, void, (void *, GLuint), program);
+    GLint ok = 0;
+    CALL(622, void, (void *, GLuint, GLenum, GLint *), program, 0x8b82, &ok);
+    if (!ok) return 33;
+    CALL(600, void, (void *, GLuint), program);
+    CALL(672, void, (void *, GLenum, GLuint), 0x8d40, targetFbo);
+    CALL(335, void, (void *, GLint, GLint, GLsizei, GLsizei), 0, 0, 64, 64);
+    for (unsigned round = 0; round < 2; round++) {
+        uint8_t *p = IOSurfaceGetBaseAddress(s);
+        size_t stride = IOSurfaceGetBytesPerRow(s);
+        unsigned lum = round ? 63 : 127, alpha = round ? 128 : 255;
+        for (size_t y = 0; y < 162; y++) for (size_t x = 0; x < 228; x++) {
+            p[y * stride + x * 2] = lum;
+            p[y * stride + x * 2 + 1] = alpha;
+        }
+        CALL(5, void, (void *, GLenum, GLuint), 0x0de1, tex);
+        CALL(65, void, (void *, GLenum, GLint, GLsizei), 4, 0, 3);
+        CALL(90, void, (void *));
+        uint8_t pixel[4] = {0};
+        CALL(237, void, (void *, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *), 32, 32, 1, 1, 0x1908, 0x1401, pixel);
+        GLenum err = CALL(102, GLenum, (void *));
+        printf("LA08 round %u stride %zu sample %u,%u,%u,%u error %#x\n",
+            round, stride, pixel[0], pixel[1], pixel[2], pixel[3], err);
+        if (err) return 34;
+        if (!getenv("SWEET_FAKE") && (abs(pixel[0] - lum) > 1 || abs(pixel[1] - lum) > 1 ||
+            abs(pixel[2] - lum) > 1 || abs(pixel[3] - alpha) > 1)) return 35;
+    }
+    CALL(600, void, (void *, GLuint), 0);
+    CALL(591, void, (void *, GLuint), program);
+    for (unsigned j = 0; j < 2; j++) CALL(591, void, (void *, GLuint), shaders[j]);
+    CALL(59, void, (void *, GLsizei, const GLuint *), 1, &tex);
+    CFRelease(s);
+    return 0;
+}
+
 static int test_main(void)
 {
     @autoreleasepool {
@@ -132,6 +245,10 @@ static int test_main(void)
             printf("triangle GL error %#x, centre BGRA %u,%u,%u,%u\n", err, pixel[0], pixel[1], pixel[2], pixel[3]);
             if (err) return 10;
             if (!getenv("SWEET_FAKE") && (pixel[0] || pixel[1] || pixel[2] != 255 || pixel[3] != 255)) return 11;
+            int layouts = test_row_layouts(ctx, m);
+            if (layouts) return layouts;
+            int la = test_luminance_alpha(ctx, m, fbo);
+            if (la) return la;
             CALL(643, void, (void *, GLsizei, const GLuint *), 1, &vbo);
             CALL(600, void, (void *, GLuint), 0);
             CALL(591, void, (void *, GLuint), program);

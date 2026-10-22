@@ -26,7 +26,9 @@ On the tablet run:
 ```
 
 `eagltest` must report renderer FD504, framebuffer status `0x8cd5`, no GL
-errors and the expected BGRA bytes for both a clear and a triangle. Only
+errors and the expected BGRA bytes for both a clear and a triangle. It also
+checks CA's format-less 120x120 scratch buffer, BGRA800x1280 output through
+finish_object_APPLE, and LA08 228x162 sampling after CPU updates. Only
 the real-device version verifies the pixels. It uses GLI calls throughout,
 including the ARB shader adapters used by QuartzCore.
 
@@ -51,6 +53,13 @@ test alone is **not evidence that the GUI uses the GPU**.
 restore backboardd's ProgramArguments to `/usr/libexec/backboardd` using the
 SD file-transfer tool. Preserve the previous launchd cache and Mesa library
 before replacing them. No kernel/recovery reflash is needed with kernel 0129.
+
+Nonaligned rows use a padded GPU IOSurface. CPU row copies preserve the
+original stride; texture binds refresh CPU changes, and finish/flush/object
+fences wait for the GPU before copying results back. This is a conservative
+compatibility path with extra CPU work, pending hardware performance tests.
+Aligned surfaces continue to import directly. PixelFormat0 scratch surfaces
+use the format supplied by the EAGL call.
 
 The bridge handles the IOSurface path observed in this firmware. Drawable
 renderbuffer allocation is not implemented; unsupported surface formats
