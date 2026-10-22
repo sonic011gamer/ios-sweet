@@ -64,6 +64,7 @@ for i, member in enumerate(x.strip() for x in body.split(';') if x.strip()):
     if not m:
         raise ValueError(member)
     ret, name, args = m.groups()
+    ret = ret.strip()
     params = args.split(',')[1:]
     args = ','.join(params).strip() or 'void'
     argv = [re.search(r'(\w+)\s*$', p.strip())[1] for p in params]
