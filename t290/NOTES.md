@@ -27,6 +27,12 @@
 - Regression test now covers format0 120x120, BGRA800x1280 with object-fence
   output/all rows, and LA08 228x162 sampling plus a later CPU update. Both
   ES2/ES3 run these cases before backboardd can use the new bridge.
+- CI 39742047004 (09a40d0) passes the iOS build and both GLES fake-GPU
+  regression paths; this does NOT validate GPU pixels. Follow-up 3f0bd95
+  limits object-fence publication to that object and copies only changed
+  rows, avoiding full-display copies for every small image fence.
+  CI 39742295266 iOS build/mac smoke passed; layout job still pending when
+  checked. Corrected signed tolerance arithmetic in the LA08 pixel check.
 
 ### Earlier kernel-0130 preparation and installation
 

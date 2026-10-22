@@ -123,7 +123,7 @@ static int test_luminance_alpha(id ctx, struct Macro *m, GLuint targetFbo)
     for (unsigned round = 0; round < 2; round++) {
         uint8_t *p = IOSurfaceGetBaseAddress(s);
         size_t stride = IOSurfaceGetBytesPerRow(s);
-        unsigned lum = round ? 63 : 127, alpha = round ? 128 : 255;
+        int lum = round ? 63 : 127, alpha = round ? 128 : 255;
         for (size_t y = 0; y < 162; y++) for (size_t x = 0; x < 228; x++) {
             p[y * stride + x * 2] = lum;
             p[y * stride + x * 2 + 1] = alpha;
