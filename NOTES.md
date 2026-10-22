@@ -8,6 +8,54 @@ shows almost black lock screen. Bounded shader/texture trace bridge staged
 on SD, awaiting next manual iPadOS boot. Kernel monotonic-time panic also
 observed; not fixed. No recovery reflash needed for staged diagnostic.
 
+### msm8994 (Lumia 950 XL) handoff — 2026-10-23
+
+**Panic root-caused and bootargs fixed; new image `out-new.img` awaits device test.**
+- Out-of-boot panic "Unaligned kernel data abort." (ESR 0x96000061): pc `gc_enable+0x540`
+  (`stp q0,q0,[x5,#-0x10]`, new-clang vectorized stock `vc_clear_screen` fill, symbolized
+  against `xnu/out/kernel.development.sweet`, kernel == out.img payload), caller
+  `_sleh_synchronous_sp1`. Crash regs: row index x9=1, stride x12=0xca8, per-row fill
+  x13=0x32a, far 0x…0a040ca8 → vinfo.v_baseaddr 16-aligned, **v_rowbytes 3240 (not
+  16-multiple)**, row 1's vector store faults. 3240 = 1080×3 = the milestone-5 diag
+  loader bootargs (`t290/shim/diag.c` "act as iBoot", ~line 1992):
+  v_rowBytes=FB_W*3, v_depth=24. (Loader in out.img = t290/shim, not shim/.)
+- Fix applied (user decision: stride is 4×1080): diag.c bootargs now
+  1080×1920, v_rowBytes=4320, v_depth=32; splash itself stays 24 bpp (put_px),
+  cosmetically overwritten; kernel log console stays on ADT sweet-fbcon
+  (bpp 3, shift 229). Loader rebuilt (`t290/shim/out/Image` 94 208 B,
+  0x10e0/32 verified in code), new image **`out-new.img`** at repo root:
+  byte-exact repack of out.img layout (base 0x10000000, kernel 0x8000,
+  ramdisk 0x1000000, tags 0x100, pagesize 2048, ramdisk = original
+  payload/kernel unchanged); only loader Image.gz differs (+1 gz byte).
+- **Boot got past both panics** (alignment fix + a 0082 kernel Personality patch 
+  commit d351065 for SweetPlatformExpert/SweetCPU matching on lumia/cortex-a57).
+  Console now reaches: platform expert, AKS/WDT/SURF registers, SweetBattery,
+  ml_processor_register for 4 CPUs, SweetFramebuffer, `SWEET CPU: cpus=4
+  selected=4 (limit=4)`, cpu0 initCPU mpidr=0x0 alive; then hangs at
+  `cpu=1 CPU_ON target=0x1 entry_pa=0x81429000 context=1` (console stops, WDT
+  reboots the phone).
+- Root-cause of the CPU_ON hang (from `ios-cityman_old/msm8994/CONTEXT.md`,
+  measured on this phone 2026-10-20): msm8994 mainline uses **PSCI 0.2 over the
+  HVC conduit** (`method = "hvc"`); HVC is answered by the boot firmware,
+  **SMC wedges**. Our kernel's SweetCPU defaults to SMC → hang inside the call
+  (the `PSCI CPU_ON rc=` line never printed).
+- Fix, no kernel rebuild needed: `SweetCPU.cpp` accepts the **`sweetpsci=hvc`
+  boot-arg** to switch the conduit. xnu's SCTLR_EL1 default sets bit 20 (HVC
+  allowed at EL1), so the call traps correctly. Rails/clocks are already set by
+  the t290 shim's `cpu_boost()` (SPMI S5 885 mV, A53 PLL L=89 = 1708.8 MHz) —
+  the secondaries come up at full cluster speed.
+- **`out-psci.img` awaits device test** (repo root): byte-exact in-place edit of
+  the booted `out.img`, only the payload cmdline field (ramdisk+0x48) gained
+  ` sweetpsci=hvc`; kernel/gz/DTB byte-identical. `fastboot boot out-psci.img`.
+  Expect `cpu=1 PSCI CPU_ON rc=0` → `entered initCPU mpidr=0x1` → `came alive;
+  SGI1 OK` → cpu=2/3 → driver stack. If a panic `NOT alive: PSCI CPU_ON rc=<n>`
+  appears: -1 NOT_SUPPORTED, -2 INVALID_PARAMS, -3 DENIED, -4 ALREADY_ON.
+
+- Clean xnu workspace for the repo patchset: `/tmp/opencode/xnu-verify` reset to
+  1b191cb (xnu-8796.141.3); all 57 `xnu/patches/*.patch` apply cleanly; stage
+  scripts 0019/0020/0026 also ran (only the macOS-only `xcrun …TargetConditionals.h`
+  tail steps no-op on Linux — add a fake TargetConditionals.h before building).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

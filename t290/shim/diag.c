@@ -22,36 +22,35 @@ static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 
 /* ---- hardware (live FDT of SM-T290, board P81080BA5) ---- */
-#define SPLASH_PHYS	0x90000000UL	/* reserved-memory cont_splash_mem */
-#define FB_W		800
-#define FB_H		1280
+#define SPLASH_PHYS	0x03400000UL	/* reserved-memory cont_splash_mem */
+#define FB_W		1080
+#define FB_H		1920
 
 /* MDP registers (0x1a01000): reading them resets the tablet, leave alone. */
+#define GCC_BASE        0xFC400000UL    /* CLK_CTL_BASE */
+#define GCC_SDCC1_CMD   0x4D0           /* SDCC1_CMD_RCGR */
+#define GCC_SDCC1_APPS  0x4C4           /* SDCC1_APPS_CBCR */
+#define GCC_SDCC1_AHB   0x4C8           /* SDCC1_AHB_CBCR */
+#define GCC_SDCC2_CMD   0x510           /* SDCC2_CMD_RCGR */
+#define GCC_SDCC2_CFG   0x514           /* SDCC2_CFG_RCGR */
+#define GCC_SDCC2_APPS  0x504           /* SDCC2_APPS_CBCR */
+#define GCC_SDCC2_AHB   0x508           /* SDCC2_AHB_CBCR */
+#define CBCR_CLK_OFF    (1U << 31)
+#define CBCR_CLK_ENABLE 1U
 
-#define GCC_BASE	0x01800000UL
-#define GCC_SDCC1_CMD	0x42004
-#define GCC_SDCC1_APPS	0x42018
-#define GCC_SDCC1_AHB	0x4201c
-#define GCC_SDCC2_CMD	0x43004
-#define GCC_SDCC2_CFG	0x43008
-#define GCC_SDCC2_APPS	0x43018
-#define GCC_SDCC2_AHB	0x4301c
-#define CBCR_CLK_OFF	(1U << 31)
-#define CBCR_CLK_ENABLE	1U
-
-#define SDC2_HC		0x07864900UL	/* SDHCI standard registers */
-#define SDC2_CORE	0x07864000UL	/* Qualcomm core_mem */
-#define TLMM_BASE	0x01000000UL
-#define SD_CD_GPIO	67
-#define TLMM_SDC2_CTL	0x109000	/* sdc2 clk/cmd/data pull + drive (pinctrl-msm8937) */
+#define SDC2_HC         0xF98A4900UL    /* MSM_SDC2_SDHCI_BASE */
+#define SDC2_CORE       0xF98A4000UL    /* MSM_SDC2_BASE */
+#define TLMM_BASE       0xFD510000UL    /* TLMM_BASE_ADDR */
+#define SD_CD_GPIO      100             /* Original TLMM fallback; Lumia 950 XL overrides this to PMIC GPIO 8 */
+#define TLMM_SDC2_CTL   0x2048          /* SDC2_HDRV_PULL_CTL offset */
 
 /* APSS watchdog (qcom,msm-watchdog): LK leaves it running, ~18 s to bite. */
-#define WDT_BASE	0x0b017000UL
-#define WDT_RST		0x04
-#define WDT_EN		0x08
-#define WDT_STS		0x0c
+#define WDT_BASE        0xF9017000UL    /* APCS_KPSS_WDT_BASE */
+#define WDT_RST         0x04
+#define WDT_EN          0x08
+#define WDT_STS         0x0c
 
-#define PSCI_VERSION		0x84000000UL
+#define PSCI_VERSION    0x84000000UL
 
 /*
  * Progress log in the ramoops console zone (reserved-memory ramoops@92100000:
@@ -60,7 +59,7 @@ static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; 
  * /sys/fs/pstore/console-ramoops-0. Each step is logged before it runs, so
  * the last line names the access that reset the tablet.
  */
-#define PLOG_BASE	0x92140000UL
+#define PLOG_BASE	0xd9d00000UL
 #define PLOG_SIZE	0x40000U
 #define PRZ_SIG		0x43474244U	/* "DBGC" persistent_ram_buffer */
 #define RUNS_AT		0x913f0000UL	/* end of cont_splash_mem, unused by the 800x1280 fb */
@@ -138,7 +137,7 @@ static int row;
  * screen (x, y) lives at buffer (x - SCAN_SHIFT, y), one row up when that
  * goes negative.
  */
-#define SCAN_SHIFT	229
+#define SCAN_SHIFT	0
 
 static void put_px(int x, int y, uint32_t rgb)
 {
@@ -1986,16 +1985,17 @@ static const char *xnu_boot(uintptr_t dtb)
 	ba->memSize = p->mem_size;
 	ba->topOfKernelData = top;
 	/*
-	 * The splash is 24 bpp and scanned out shifted (see put_px); xnu's own
-	 * video console only knows 32 bpp, so it stays off. The kernel draws
-	 * through the ADT's sweet-fbcon (bpp 3, shift 229) instead.
+	 * xnu's own video console only knows 32 bpp; report the splash as
+	 * 32 bpp with the 4*1080 stride. The splash itself is scanned out
+	 * 24 bpp shifted (see put_px), so this feed does cosmetic damage
+	 * to it, but booting matters more.
 	 */
 	ba->Video.v_baseAddr = SPLASH_PHYS;
 	ba->Video.v_display = 0;
-	ba->Video.v_rowBytes = FB_W * 3;
+	ba->Video.v_rowBytes = FB_W * 4;
 	ba->Video.v_width = FB_W;
 	ba->Video.v_height = FB_H;
-	ba->Video.v_depth = 24;
+	ba->Video.v_depth = 32;
 	ba->deviceTreeP = adt_pa - pa_of_va_base;	/* xnu reads it with the MMU on: a VA */
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
@@ -2460,51 +2460,6 @@ static void boot_menu(uint64_t dtb, uint32_t runs)
 	}
 #endif
 	ts_ok = touch_init();
-	for (;;) {
-		con_clear(DARK);
-		text_at(50, 80, "SM-T290", WHITE, DARK, 4);
-		text_at(50, 160, "Choose a system", YELLOW, DARK, 2);
-		for (int i = 0; i < 5; i++)
-			draw_button(&menu[i], 0);
-		if (!ts_ok) {
-			/* no touch: the menu cannot be used, keep the old behaviour */
-			text_at(50, 1100, "touch not found: iPadOS in 5 s", RED, DARK, 2);
-			delay_ms(5000);
-			break;
-		}
-		char run[] = "run 0000";
-		fmt_hex(run + 4, runs, 4);
-		text_at(50, 1200, run, GREY, DARK, 2);
-		char mhz[] = "CPU 0000 MHz";
-		uint32_t m = cpu_mhz();
-		for (int i = 3; i >= 0; i--, m /= 10)
-			mhz[4 + i] = (char)('0' + m % 10);
-		text_at(330, 1200, mhz, GREY, DARK, 2);
-		plog_str(mhz);
-		plog_putc('\n');
-		int k = wait_tap(menu, 5);
-		if (k == 0)
-			break;
-		if (k == 1) {
-			boost = 1;
-			break;
-		}
-		if (k == 2) {
-			boot_android();
-			continue;
-		}
-		if (k == 3) {
-			con_clear(DARK);
-			con_str("T290", "GPU diagnostics");
-			gpu_probe();
-			for (int i = 0; i < 2; i++)
-				draw_button(&again[i], 0);
-			if (wait_tap(again, 2) == 0)
-				log_viewer();
-			continue;
-		}
-		log_viewer();
-	}
 	con_clear(DARK);
 	con_str("T290", "booting iPadOS 16");
 #if defined(T290_GPU2)
