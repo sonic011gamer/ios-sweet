@@ -6,6 +6,40 @@
 
 ## Active handoff 2026-10-22: EAGL bridge
 
+### Latest result: real GPU pixel tests PASS; compositor client-image crash fixed, retest pending
+
+- Boot with bridge3 completed all 5 SD operations. `eagltest` reported ES2
+  and ES3 renderer FD504, FBO 0x8cd5, clear BGRA 191/128/64/255, triangle
+  centre 0/0/255/255, and final exit 0. **Real GPU pixels are now verified.**
+  Logs: `ios-t290/logs/eagl3-{console,head}.bin`.
+- The guard injected backboardd, which created ES3 and imported its 800x1280
+  display surface. It then crashed (SIGSEGV, far 0x30): memcpy from NULL+0x30
+  inside `IOSurfaceClientGetBulkAttachments`, called by CA's
+  `iosurface_get_edr_factor` / `WindowServer::IOSurface::wrap_buffer`.
+- Exact cause from firmware disassembly: IOSurface selector 6 =
+  `IOSurfaceClientWrapClientImage` (32-byte input, 0xa68-byte lock result).
+  The generic success/zero-output stub creates an invalid IOSurfaceClient
+  with no state page. The GPU itself did not fault.
+- Fix 3dd79a4 interposes `IOSurfaceWrapClientImage` to return NULL on iOS,
+  allowing CA's existing GL texture-upload fallback for CPU images. Native
+  IOSurfaces still import directly. The new device test checks that this
+  interposition actually takes effect; otherwise the guard uses CPU GUI.
+- **EAGL build/mac smoke CI 39737962131 passed**. Artifacts `dl/eagl-bridge4`.
+  **Current pending SD request: 2 puts**, bridge4 dylib and eagltest only.
+  Existing guarded launchd config / t290launch remain in use. User asked
+  to boot and retest; Android was present when the request was written.
+- Kernel fix 0c84f68 / patch 0130 returns kIOReturnUnsupported for selector
+  6 instead of a bogus success. Dry-run applies. **Kernel CI 39738089026
+  running**, SWEET_BOARD=t290. No recovery/boot partition flashed. The
+  bridge4 test uses existing kernel 0129; kernel 0130 would make the
+  workaround unnecessary but is not installed.
+- Next: read pstore after bridge4 boot. Look for regression check, final
+  pixel PASS, backboardd texture-upload fallback and a rendered UI. If the
+  hook does not intercept calls from QuartzCore, kernel 0130 is the fix;
+  prepare/review its boot image before asking to write recovery.
+
+### Earlier steps
+
 - Verified from `ios-t290/logs/ps-eagl4.bin`: `t290launch` successfully injects
   the probe into backboardd, but Apple's `initWithAPI:properties:` returns nil
   for both ES3 and ES2. The GUI is still software rendered.

@@ -218,3 +218,23 @@ libdrm and sys/sysinfo.h; CI mesa-ios (macos-14, meson 1.5.2, brew bison).
 Output: libOSMesa.8.dylib (desktop GL; GLES2 needs shared glapi, later) and
 t290/mesa/test/gltri (triangle + 100 frames + PPM), installed in /usr/lib
 and /usr/bin with t290-xfer, started by launchd job com.t290.gltri.
+
+## EAGL on real hardware (2026-10-22)
+
+Mesa now has shared glapi, real GLES contexts and IOSurface imports. The
+EAGL bridge supplies QuartzCore's context-first GLI dispatch table (975
+typed adapters). On SM-T290 both ES2 and ES3 tests passed: FBO 0x8cd5,
+GL errors 0, clear BGRA 191/128/64/255 and shader triangle 0/0/255/255.
+`eagltest` final exit 0 is logged through SweetGPU selector 7. This verifies
+actual GPU pixels, not only command generation.
+
+The first injected compositor created ES3 and imported an 800x1280 target,
+but crashed while wrapping a CPU image as an IOSurface. Selector 6
+(`IOSurfaceClientWrapClientImage`) was unimplemented yet returned success
+with a zero lock result; `IOSurfaceClientGetBulkAttachments` copied from
+NULL+0x30 when CA read the EDR factor. Logs: ios-t290/logs/eagl3-*.bin.
+
+Bridge4 returns NULL for the optional IOSurfaceWrapClientImage path, so CA
+can use its existing GL texture-upload path. Patch 0130 fixes the kernel
+reply to kIOReturnUnsupported. See t290/NOTES.md for current staged files,
+CI IDs and device test status. GPU-accelerated GUI remains unverified.
