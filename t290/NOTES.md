@@ -41,20 +41,21 @@
   `dl/eagl-k0130/repack.py` replaces only the XNU payload, preserving shim,
   appended DTB, ADT, boot args and opaque Samsung/AVB metadata. The unchanged
   payload packing round trip is byte-identical to the backup.
-- **Ready for approval:** `dl/eagl-k0130/recovery-0130.img` (64 MiB), SHA256
+- **INSTALLED:** `dl/eagl-k0130/recovery-0130.img` (64 MiB), SHA256
   144be875b8fca287c46e45e2fcd622255709b2f4deb341a7923023454cb50dc4.
   Preserved shim/DTB, ADT, boot args and opaque AVB metadata; unpack/check
   passed. Pushed to `/data/local/tmp/recovery-0130.img`; device SHA matches.
-  Recovery is still the backed-up dba7a21a... image; partition size 67108864.
+  Partition size 67108864. Original dba7a21a... recovery remains in the backup.
 - **User explicitly approved writing recovery** (reply "Да, записать recovery"
-  on 2026-10-22). Do not ask for permission again. The write has NOT happened:
-  adb disconnected before the flash-helper upload. PC adb restart found the
-  device offline; user asked to reconnect USB / unlock Android / accept USB
-  debugging if requested. Continue when adb becomes `device`.
+  on 2026-10-22). After an adb disconnect, user reconnected USB and Android
+  became available. The approved helper successfully wrote recovery, synced
+  and read back the full partition: SHA256 144be875...cb50dc4 (matches image).
 - Approved flash helper `dl/eagl-k0130/flash-approved.sh` verifies image hash,
   original partition hash and 64 MiB partition size before dd, then syncs
-  and verifies the entire partition SHA256. Push it and run via su when the
-  connection returns. Existing guard and bridge4 can test kernel 0130.
+  and verifies the entire partition SHA256. Write completed successfully.
+  Existing guard and bridge4 remain active. **Next: manual iPadOS boot with
+  kernel 0130, then return to Android and read pstore.** No adb reboot
+  recovery command (LK misc/recovery-loop issue); user uses buttons/menu.
 - `t290-xfer.ps1` now checks every adb exit code and refuses to use stale
   local transfer headers after connection errors. Tested normal result
   reading and an injected native-command failure (exit 7); both pass.
