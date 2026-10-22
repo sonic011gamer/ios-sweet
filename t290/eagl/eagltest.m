@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #include "surface.h"
 #include <dlfcn.h>
+#include <TargetConditionals.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -37,6 +38,20 @@ static int tlog(const char *format, ...)
 static int test_main(void)
 {
     @autoreleasepool {
+#if TARGET_OS_IPHONE
+        /* Regression: the unimplemented kernel selector used to return a
+         * seemingly valid client with null shared state, crashing CA. */
+        extern IOSurfaceRef IOSurfaceWrapClientImage(uint32_t, uint32_t,
+            uint32_t, uint32_t, uint32_t, void *);
+        uint8_t image[64 * 64 * 4] = {0};
+        IOSurfaceRef wrapped = IOSurfaceWrapClientImage(64, 64, 0x42475241, 256, 0, image);
+        if (wrapped) {
+            printf("FAIL: client-image interposition did not take effect\n");
+            CFRelease(wrapped);
+            return 12;
+        }
+        printf("PASS: unsupported client-image wrapping uses GL uploads\n");
+#endif
         /* macOS has no EAGLContext: exercise the same implementation directly. */
         Class cls = NSClassFromString(@"EAGLContext") ?: NSClassFromString(@"T290Context");
         for (unsigned api = 2; api <= 3; api++) {

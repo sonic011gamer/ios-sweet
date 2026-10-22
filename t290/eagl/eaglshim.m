@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #include "surface.h"
 #include <dispatch/dispatch.h>
+#include <TargetConditionals.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -54,6 +55,31 @@ static void plog(const char *fmt, ...)
 /* Diagnostics from the standalone test must survive unavailable stdio. */
 void T290EAGLLog(const char *message);
 void T290EAGLLog(const char *message) { plog("eagltest: %s", message); }
+
+#if TARGET_OS_IPHONE
+/*
+ * Kernel 0129 has no IOSurface WrapClientImage (selector 6). Its generic
+ * success reply constructs an empty IOSurfaceClient; CA then dereferences
+ * its null shared-state pointer in IOSurfaceGetBulkAttachments. Report
+ * unsupported here so CA::Render::Image::io_surface returns NULL and the
+ * GLES renderer uploads the image through glTexImage/SubImage instead.
+ * Real IOSurfaces (including the display target) still import into Mesa.
+ */
+extern IOSurfaceRef IOSurfaceWrapClientImage(uint32_t width, uint32_t height,
+    uint32_t fourcc, uint32_t row_bytes, uint32_t options, void *address);
+static IOSurfaceRef t290_wrap_client_image(uint32_t width, uint32_t height,
+    uint32_t fourcc, uint32_t row_bytes, uint32_t options, void *address)
+{
+    static unsigned count;
+    if (__atomic_fetch_add(&count, 1, __ATOMIC_RELAXED) < 8)
+        plog("t290eagl: client image %ux%u fmt %#x: use GL texture upload", width, height, fourcc);
+    return NULL;
+}
+__attribute__((used, section("__DATA,__interpose")))
+static const struct { const void *replacement, *original; } surface_interpose[] = {
+    {(const void *)t290_wrap_client_image, (const void *)IOSurfaceWrapClientImage},
+};
+#endif
 
 @interface T290Sharegroup : NSObject
 @property(nonatomic, assign) void *root;
