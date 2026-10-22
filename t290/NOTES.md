@@ -6,6 +6,15 @@
 
 ## Active handoff 2026-10-22: FPS and missing UI, kernel 0135 preparation
 
+- **CI update:** 39792400349 kernel reuse/upload SUCCESS, iOS bridge build
+  and upload SUCCESS. Host Mesa libraries built, but optional glprobe failed
+  compiling ARM-only watchdog registers on Intel. ecb3b26 adds x86_64
+  thread-state sampling; diff --check PASS. New combined run **39794145243**
+  reuses kernel artifact from 39792400349. Host ES2/ES3 tests still pending.
+  Deleted superseded 39788991320 after kernel was safely reuploaded.
+  Keep 39792400349 until 39794145243 reuploads kernel, then remove it.
+  No new userland artifact installed and no hardware reboot/test yet.
+
 - **RECOVERY 0135 INSTALLED (user explicitly approved this write).**
   Guarded write checked model SM-T290, 64 MiB partition size, current 0133
   hash, staged image hash and saved backup hash before dd + sync.
