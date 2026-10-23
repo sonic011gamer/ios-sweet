@@ -10,6 +10,34 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
+**UPDATE: iPhone10,3 root is BACK ON the 4K kernel — patch 0116 (commit 71c0e10).**
+- Boot of `out-rpm.img` reached: HFS+ root mounted rw (`vol=iOSRoot`), launchd ran,
+  ignition started; dyld cache directory found, then
+  `disallowing unsupported code signature page shift: 14` → `unable to create a
+  validated cs_blob object: 85` → `code signature registration for shared cache
+  failed` → `Library not loaded: /usr/lib/libSystem.B.dylib (no dyld cache)` →
+  launchd exit 1 → panic `initproc failed to start`.
+- Cause: `bsd/kern/ubc_subr.c` `cs_validate_codedirectory()` only accepts
+  `pageSize == PAGE_SHIFT_4K(12)` or `PAGE_SHIFT` (=12 on the 4 KiB t290/8994
+  builds, cf. CI `SWEET_BOARD=t290 = 4K pages + GICv2`). The iPhone10,3 (A11)
+  iOS 16.7.16 cache hashes CD pages at 16 KiB (A11 = 16K-page device) → 14 →
+  rejected. The cache CODE is page-size agnostic; only the hash metadata isn't.
+- **Fix committed (71c0e10): `xnu/patches/0116-sweet-cs-16k-cd-on-4k.patch`** —
+  accept `pageSize 14` in the gate; `cs_validate_hash()` skips blobs hashed at a
+  coarser granularity than the kernel page (pages then run unvalidated;
+  enforcement keys only on taint). Applied + `git apply` verified against the
+  fully-patched /tmp/opencode/xnu-verify tree; no other patch touches
+  ubc_subr.c. iPadOS roots / 16K builds unaffected (pure acceptance superset).
+- NEXT: push → CI kernel → repack with the SAME vt20 ADT + SAME cmdline
+  (no new args) →`out-cs.img` → boot, card inserted after fastboot. Expect the
+  cache to register; the next blocker is whatever iPhone X userspace wants next.
+  Fallback if 0116 fails: run the iPadOS 16.7.16 (iPad6,11) root path
+  (`tools/mkiosroot.sh` + `mkroot-ipad5.sh` dmg list OS=087-86634-044.dmg,
+  SystemOS=087-86624-047.dmg, AppOS=087-86715-047.dmg) — proven to lock screen
+  on t290 (`t290/NOTES.md` 2026-10-20).
+- GPT-revert experiments (1 GiB tail wipe etc.) remain valid but secondary; the
+  card currently still boots with insert-after-fastboot.
+
 **UPDATE (later 2026-10-23): sdroot HFS+ root MOUNTED and launchd ran; new root image needed.**
 - Boot of `out-rpm.img` (card inserted after fastboot): HFS+ volume header read and
   mounted rw (`hfs: set hardlink bit on vol=iOSRoot`); `libignition` ran, dyld cache
