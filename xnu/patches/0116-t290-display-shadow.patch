@@ -1,0 +1,219 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..52401c1 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -50,6 +50,20 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
++#if defined(SWEET_T290)
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <pexpert/device_tree.h>
++extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
++/*
++ * SM-T290: LK leaves an 800x1280 RGB888 splash (bytes R,B,G) that the panel
++ * scans out shifted right with wrap-around (t290/shim/diag.c). The GUI draws
++ * into a 1536x2048 BGRA shadow, the iPad 5 panel; each flush halves it and
++ * centres the 768x1024 result on the panel.
++ */
++#define T290_SHADOW_W   1536u
++#define T290_SHADOW_H   2048u
++#endif
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -116,6 +130,16 @@ public:
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++#if defined(SWEET_T290)
++	/* fPhys/fWidth/fHeight/fRowBytes/fPixels describe the shadow then */
++	bool          fT290;
++	uintptr_t     fPanel;         /* write-combined mapping of the splash */
++	uint32_t      fPanelW, fPanelH, fPanelRow, fPanelShift;
++	bool          fPanelCleared;
++	IOBufferMemoryDescriptor *fShadow;
++	bool t290Setup(void);
++	void t290Panel(void);
++#endif
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -162,6 +186,13 @@ AppleCLCD::start(IOService *provider)
+ 	fWidth = (uint32_t)video.v_width;
+ 	fHeight = (uint32_t)video.v_height;
+ 	fRowBytes = (uint32_t)video.v_rowBytes;
++#if defined(SWEET_T290)
++	if (fPhys != 0 && fWidth != 0 && fHeight != 0 && fRowBytes >= fWidth * 3 &&
++	    fRowBytes < fWidth * 4 && !t290Setup()) {
++		IOLog("SWEET FB: T290 shadow framebuffer setup failed\n");
++		return false;
++	}
++#endif
+ 	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
+ 		IOLog("SWEET FB: no boot framebuffer\n");
+ 		return false;
+@@ -238,6 +269,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
+ 				}
+ 			}
++#if defined(SWEET_T290)
++			if (fb->fT290) {
++				fb->t290Panel();
++			}
++#endif
+ 		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+@@ -399,7 +435,88 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		s->release();
+ 	}
++#if defined(SWEET_T290)
++	if (fT290) {
++		t290Panel();
++	}
++#endif
++}
++
++#if defined(SWEET_T290)
++bool
++AppleCLCD::t290Setup(void)
++{
++	DTEntry entry;
++	uint32_t const *val;
++	unsigned int size;
++
++	fPanelW = fWidth;
++	fPanelH = fHeight;
++	fPanelRow = fRowBytes;
++	fPanelShift = 0;
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) == kSuccess &&
++	    SecureDTGetProperty(entry, "shift", (void const **)&val, &size) == kSuccess &&
++	    *val < fPanelW) {
++		fPanelShift = *val;
++	}
++	if (fPanelW < T290_SHADOW_W / 2 || fPanelH < T290_SHADOW_H / 2) {
++		return false;
++	}
++	fPanel = ml_io_map_wcomb((vm_offset_t)fPhys, (vm_size_t)fPanelRow * fPanelH);
++	fShadow = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++	    kIODirectionInOut | kIOMemoryPhysicallyContiguous,
++	    (vm_size_t)T290_SHADOW_W * T290_SHADOW_H * 4, 0x00000000fffff000ULL);
++	if (fPanel == 0 || fShadow == NULL) {
++		return false;
++	}
++	bzero(fShadow->getBytesNoCopy(), fShadow->getLength());
++	fPhys = fShadow->getPhysicalAddress();
++	/* the IOSurface maps the shadow again: no dirty lines of this alias may linger */
++	flush_dcache64((addr64_t)fPhys, (unsigned)fShadow->getLength(), TRUE);
++	fWidth = T290_SHADOW_W;
++	fHeight = T290_SHADOW_H;
++	fRowBytes = T290_SHADOW_W * 4;
++	fT290 = true;
++	IOLog("SWEET FB: T290 panel %ux%u RGB888 shift %u, GUI on a %ux%u shadow at 0x%llx\n",
++	    fPanelW, fPanelH, fPanelShift, fWidth, fHeight, fPhys);
++	return true;
++}
++
++/* Shadow (BGRA) -> panel: 1/2 nearest, centred, bytes R,B,G, scan-out shift. */
++void
++AppleCLCD::t290Panel(void)
++{
++	uint32_t outW = fWidth / 2, outH = fHeight / 2;
++	uint32_t ox = (fPanelW - outW) / 2, oy = (fPanelH - outH) / 2;
++
++	if (!fPanelCleared) {
++		fPanelCleared = true;
++		for (uint64_t i = 0; i < (uint64_t)fPanelRow * fPanelH; i += 4) {
++			*(volatile uint32_t *)(fPanel + i) = 0;
++		}
++	}
++	for (uint32_t py = 0; py < outH; py++) {
++		const uint32_t *src = (const uint32_t *)(fPixels + (uint64_t)(2 * py) * fRowBytes);
++		uint32_t sy = oy + py;
++		for (uint32_t px = 0; px < outW; px++) {
++			uint32_t v = src[2 * px];
++			int32_t bx = (int32_t)(ox + px) - (int32_t)fPanelShift;
++			uint32_t by = sy;
++			if (bx < 0) {
++				if (by == 0) {
++					continue;
++				}
++				bx += (int32_t)fPanelW;
++				by--;
++			}
++			volatile uint8_t *d = (volatile uint8_t *)(fPanel + (uint64_t)by * fPanelRow + (uint64_t)bx * 3);
++			d[0] = (uint8_t)(v >> 16);      /* R */
++			d[1] = (uint8_t)v;              /* B */
++			d[2] = (uint8_t)(v >> 8);       /* G */
++		}
++	}
+ }
++#endif
+ 
+ bool
+ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index ede28cb..19f5016 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -295,6 +295,25 @@ int sweet_console_muted;
+ static volatile uint8_t *t290_prz;
+ static uint32_t t290_prz_pos, t290_prz_full;
+ 
++/*
++ * The first 256K of the console also go to the ramoops dump zone in front
++ * of it and are never overwritten there (Linux: dmesg-ramoops-0), so the
++ * boot messages survive a crash loop that wraps the console zone.
++ */
++#define T290_HEAD_PHYS  0x92100000UL
++static volatile uint8_t *t290_head;
++static uint32_t t290_head_pos;
++
++static void
++t290_head_put(const char *c, int size)
++{
++	for (int i = 0; i < size && t290_head_pos < T290_PRZ_DATA; i++) {
++		t290_head[12 + t290_head_pos++] = (uint8_t)c[i];
++	}
++	((volatile uint32_t *)t290_head)[1] = t290_head_pos;
++	((volatile uint32_t *)t290_head)[2] = t290_head_pos;
++}
++
+ static void
+ t290_prz_put(const char *c, int size)
+ {
+@@ -308,6 +327,9 @@ t290_prz_put(const char *c, int size)
+ 	}
+ 	hdr[1] = t290_prz_pos;                                 /* start */
+ 	hdr[2] = t290_prz_full ? T290_PRZ_DATA : t290_prz_pos; /* size */
++	if (t290_head != NULL && t290_head_pos < T290_PRZ_DATA) {
++		t290_head_put(c, size);
++	}
+ }
+ 
+ void sweet_t290_pstore_init(void);
+@@ -328,6 +350,21 @@ sweet_t290_pstore_init(void)
+ 	uint64_t pos = total > T290_PRZ_DATA ? total - T290_PRZ_DATA : 0;
+ 	char chunk[256];
+ 	uint32_t n;
++
++	volatile uint8_t *h = (volatile uint8_t *)ml_io_map(T290_HEAD_PHYS, T290_PRZ_SIZE);
++	if (h != NULL) {
++		static const char hdr[] = "====1.0-N\n";        /* ramoops kmsg header */
++		uint64_t hpos = 0;
++		((volatile uint32_t *)h)[0] = T290_PRZ_SIG;
++		t290_head = h;
++		t290_head_pos = 0;
++		t290_head_put(hdr, (int)sizeof(hdr) - 1);
++		while (hpos < total && t290_head_pos < T290_PRZ_DATA &&
++		    (n = sweet_log_copy(&hpos, chunk, sizeof(chunk))) > 0) {
++			t290_head_put(chunk, (int)n);
++		}
++	}
++
+ 	t290_prz = m;
+ 	while (pos < total && (n = sweet_log_copy(&pos, chunk, sizeof(chunk))) > 0) {
+ 		t290_prz_put(chunk, (int)n);

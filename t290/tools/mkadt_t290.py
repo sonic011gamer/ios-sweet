@@ -37,7 +37,7 @@ QEMU_VTIMER_INTID = 27        # QEMU virt only
 QEMU_VIRTIO_MMIO = 0x0a000000
 
 # /product of the real iPad 5 (J71sAP) device tree
-J71SAP_ADT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../research/ipsw-x/d22ap.adt')
+J71SAP_ADT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../research/ipsw-ipad5/j71sap.adt')
 
 def set_props(n, **kv):
     """Replace (or append) properties; values are bytes."""
@@ -127,9 +127,9 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1, native=False, seed_file
         root.children.append(vblk)
 
     # Append Cityman and MSM8994 targets while preserving iPhone10,3 for XNU match checks
-    set_props(root, compatible=cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
+    set_props(root, compatible=cstr('J71sAP') + cstr('iPad6,11') + cstr('xiaomi,sweet') +
               cstr('microsoft,cityman') + cstr('qcom,msm8994') + cstr('AppleARM'),
-              model=cstr('iPhone10,3'), target_type=cstr('D22'), target_sub_type=cstr('D22AP'))
+              model=cstr('iPad6,11'), target_type=cstr('J71s'), target_sub_type=cstr('J71sAP'))
 
     # Pin /chosen/random-seed from a file so regenerated ADTs are byte-identical
     # to the shipped one (default: the seed extracted from the booted vt20 image).
