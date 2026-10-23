@@ -53,6 +53,46 @@ attribution in the conversation was WRONG. Static recon facts (all verified in
   pair-width vs page-type access fault). 0118 stays a dodge-not-fix either
   way. First confirm which reading is right BEFORE touching pmap/recovery.
 
+**UPDATE (2026-10-23 ~late): decision = option (a), implemented as patch
+`0119-sweet-sleh-fsc-decode-diag.patch` (committed with this NOTES edit).**
+- Observed discrepancy that shaped the design: per the fork's source the
+  raw4 abort (DFSC=2 → unclassified else-branch, sleh.c:1632) should have
+  printed `Unclassified kernel abort (fault_code=0x2)` via kprintf right
+  before the panic — raw4 contains NO kprintf-sourced line at all (grep:
+  zero matches), while the panic record itself survived. Two possible
+  causes, not settled: (1) console-race loss — 160 backboardd IOK lines
+  were streaming from other cores when core 0's kprintf fired and
+  pstore's console ring may have dropped it; (2) our read of the code
+  path is wrong. No conclusion drawn; the diagnostic therefore avoids
+  kprintf entirely.
+- 0119 design: a `diag_fsc_describe()` helper in sleh.c composes the
+  ENTIRE panic string: prefix + `FSC=0xNN=<DDI decode>` + level bits +
+  WnR (ESR bit 6) + FAR, then walks the faulting map's page tables
+  (`current_map()` — copyinmap had already switched into the foreign map)
+  printing the raw descriptor at every level (`L1=0x…[tab/blk/page/empty/
+  none]`, pmap min/max range), descending only through table descriptors
+  whose OA is inside `gPhysBase/gPhysSize` (`isphysmem()`) so a corrupt
+  descriptor cannot cause a nested abort during the panic. The string is
+  passed to `panic_with_thread_kernel_state()` — atomic with the panic
+  record, which pstore reliably captures. Applied at BOTH kernel-abort
+  panic sites: the alignment branch ("Unaligned kernel data abort.") and
+  the final catch-all ("Kernel data abort."). No control-flow change.
+- The walk prints the L2 descriptor of the victim pmap at 0x206de000
+  raw — that single word decides Reading A vs B offline: a block/page
+  descriptor with a Device AttrIndex (CACHE_ATTRINDX_DISABLE=3 or
+  POSTED=5/6/7) + the alignment decode => Reading B; a broken/OA-invalid
+  descriptor or `<none>` => Reading A (walk failed).
+- 0118 REMAINS in the build for this boot — with it the experiment is a
+  two-way discriminator: if the fault vanishes (boot proceeds past the
+  copyinmap), the pair-alignment mechanics are confirmed (Reading B);
+  if 0119's diagnostic fires instead, the walk decode names the real
+  fault class. Either outcome unblocks the analysis.
+- Build plan unchanged: same cmdline + vt20 ADT (memSize 0x60000000),
+  CI push → out-rpm.img → `fastboot boot`, card only after kernel boots,
+  `cp raw raw5` FIRST, then parse. Note: patch dry-run verified against
+  /tmp/opencode/xnu-verify (checks file osfmk/arm64/sleh.c, applies after
+  0004/0017/0101's unrelated hunks in sleh_irq).
+
 **UPDATE (2026-10-23 ~18:00, pstore `raw4`): boot on the 0x60000000 ADT = 16K VM mode CONFIRMED IN THE FIELD; huge progress, new wall = alignment fault (DFSC=2) on Apple's 8-aligned LDP/STP pair in `_bcopyin`, on core 0.**
 - Confirms the ~16:30 analysis end-to-end: **no** `page shift: 14` anywhere, **no**
   `cs_blob ... 85` / cache-registration failure; the stock gate accepted the 16K-hashed

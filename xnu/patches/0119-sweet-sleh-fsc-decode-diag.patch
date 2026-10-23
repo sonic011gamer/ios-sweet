@@ -1,0 +1,162 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -60,6 +60,8 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_fault.h>
+ #include <vm/vm_kern.h>
++#include <arm/pmap/pmap_internal.h>
++#include <mach/arm/vm_param.h>
+ 
+ #include <sys/errno.h>
+ #include <sys/kdebug.h>
+@@ -389,6 +391,130 @@
+ 	}
+ }
+ 
++/*
++ * sweet(msm8994) diagnostic: decode the fault status code per the ARM long
++ * descriptor FSC table and walk the faulting map's page tables, embedding the
++ * result in the panic string itself. kprintf lines outside the panic record
++ * are lost to console contention on this target (raw4 shows none), so the
++ * decode is carried by panic_with_thread_kernel_state()'s message instead.
++ * Diagnostic only: this changes no fault handling or control flow.
++ */
++static char diag_fsc_str[320];
++
++static const char *
++diag_fsc_name(fault_status_t status)
++{
++	switch (((unsigned int)status) >> 2) {
++	case 0x0: return "AddressSize"; /* 0b0000LL, incl. TTBR base */
++	case 0x1: return "Translation";
++	case 0x2: return "AccessFlag";
++	case 0x3: return "Permission";
++	default: break;
++	}
++	switch (status) {
++	case FSC_SYNC_EXT_ABORT:       return "SyncExtAbort";
++	case FSC_ASYNC_EXT_ABORT:      return "AsyncExtAbort";
++	case FSC_SYNC_EXT_ABORT_TT_L1: return "SyncExtAbortWalkL1";
++	case FSC_SYNC_EXT_ABORT_TT_L2: return "SyncExtAbortWalkL2";
++	case FSC_SYNC_EXT_ABORT_TT_L3: return "SyncExtAbortWalkL3";
++	case FSC_SYNC_PARITY:          return "SyncParity";
++	case FSC_ASYNC_PARITY:         return "AsyncParity";
++	case FSC_SYNC_PARITY_TT_L1:    return "SyncParityWalkL1";
++	case FSC_SYNC_PARITY_TT_L2:    return "SyncParityWalkL2";
++	case FSC_SYNC_PARITY_TT_L3:    return "SyncParityWalkL3";
++	case FSC_ALIGNMENT_FAULT:      return "Alignment";
++	case FSC_DEBUG_FAULT:          return "Debug";
++	default:                       return "Reserved";
++	}
++}
++
++static void
++diag_fsc_append_desc(int level, unsigned int max_level, uint64_t tte)
++{
++	const char *tname;
++	size_t off = strlen(diag_fsc_str);
++
++	if (!(tte & ARM_TTE_VALID)) {
++		tname = "empty";
++	} else if ((unsigned int)level == max_level) {
++		tname = ((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE) ?
++		    "page" : "invalidL3";
++	} else {
++		tname = ((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE) ?
++		    "tab" : "blk";
++	}
++	snprintf(diag_fsc_str + off, sizeof(diag_fsc_str) - off,
++	    " L%d=0x%016llx[%s]", level, (uint64_t)tte, tname);
++}
++
++static void
++diag_fsc_describe(const char *prefix, unsigned int esr,
++    fault_status_t fault_code, vm_map_address_t fault_addr)
++{
++	vm_map_t map;
++	pmap_t pmap;
++	const pt_attr_t *pt_attr;
++	unsigned int level;
++	size_t off;
++
++	snprintf(diag_fsc_str, sizeof(diag_fsc_str),
++	    "%s FSC=0x%02llx=%s lvl=%u WnR=%u FAR=0x%llx", prefix,
++	    (uint64_t)(unsigned int)fault_code, diag_fsc_name(fault_code),
++	    ((unsigned int)fault_code & 3u), ((esr >> 6) & 1u),
++	    (uint64_t)fault_addr);
++
++	map = current_map();
++	if (map == VM_MAP_NULL) {
++		return;
++	}
++	pmap = vm_map_pmap(map);
++	if (pmap == PMAP_NULL) {
++		return;
++	}
++	pt_attr = pmap_get_pt_attr(pmap);
++	if (pt_attr == NULL) {
++		return;
++	}
++
++	off = strlen(diag_fsc_str);
++	snprintf(diag_fsc_str + off, sizeof(diag_fsc_str) - off,
++	    " pmap=%p min=0x%llx max=0x%llx", (void *)pmap,
++	    (uint64_t)pmap->min, (uint64_t)pmap->max);
++
++	for (level = pt_attr_root_level(pt_attr);
++	     level <= pt_attr->pta_max_level; level++) {
++		tt_entry_t *ttep = pmap_ttne(pmap, level, fault_addr);
++		uint64_t tte = 0;
++		bool valid_desc;
++
++		if (ttep == TT_ENTRY_NULL) {
++			off = strlen(diag_fsc_str);
++			snprintf(diag_fsc_str + off, sizeof(diag_fsc_str) - off,
++			    " L%u=<none>", level);
++			break;
++		}
++		tte = *ttep;
++		diag_fsc_append_desc((int)level, pt_attr->pta_max_level, tte);
++
++		/*
++		 * Only descend through table descriptors whose OA is inside
++		 * kernel-managed memory, to avoid a nested abort while the
++		 * panic is assembling its message.
++		 */
++		valid_desc =
++		    (tte & ARM_TTE_VALID) &&
++		    ((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE);
++		if (!valid_desc) {
++			break;
++		}
++		if (!isphysmem(tte & ARM_TTE_TABLE_MASK)) {
++			off = strlen(diag_fsc_str);
++			snprintf(diag_fsc_str + off, sizeof(diag_fsc_str) - off,
++			    " [badOA]");
++			break;
++		}
++	}
++}
+ 
+ __dead2 __unused
+ static void
+@@ -1619,7 +1745,8 @@
+ 			handle_kernel_abort_recover(state, esr, fault_addr, thread);
+ 			return;
+ 		}
+-		panic_with_thread_kernel_state("Unaligned kernel data abort.", state);
++		diag_fsc_describe("Unaligned kernel data abort.", esr, fault_code, fault_addr);
++		panic_with_thread_kernel_state(diag_fsc_str, state);
+ 	} else if (is_parity_error(fault_code)) {
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+ 		/*
+@@ -1632,7 +1759,8 @@
+ 		kprintf("Unclassified kernel abort (fault_code=0x%x)\n", fault_code);
+ 	}
+ 
+-	panic_with_thread_kernel_state("Kernel data abort.", state);
++	diag_fsc_describe("Kernel data abort.", esr, fault_code, fault_addr);
++	panic_with_thread_kernel_state(diag_fsc_str, state);
+ }
+ 
+ extern void syscall_trace(struct arm_saved_state * regs);
