@@ -67,7 +67,9 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
   optimization: an aligned-16 fast path that re-enables the pair.
 - NEXT: push → CI → repack deck (SAME ADT + SAME cmdline, kernel from the new build)
   → `fastboot boot`, card after fastboot → new pstore dump (remember `cp raw raw-<label>`
-  BEFORE the next boot). Expect the copyin abort gone; next blocker = whatever the
+  BEFORE the next boot). Unpushed as of 2026-10-23: `c42fde3` (ADT memSize), `533d5fb`
+  (0118, its A57 wording is corrected by follow-up `f4f6647` — corrections are comments
+  only, the code is unchanged). Expect the copyin abort gone; next blocker = whatever the
   MIG/IOKit traffic surfaces after that.
 - One isolated `cs_invalid_page` in raw4 (the only one): revisit after the fix — if
   it stays a single event it is noise, not the old storm.
