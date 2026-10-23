@@ -10,6 +10,48 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
+**UPDATE (2026-10-23 ~16:30): ROOT CAUSE of the cs page-shift saga FOUND — the Lumia deck's boot_args.memSize is EXACTLY 1 GiB, so the kernel self-selects 4 KiB VM pages. Fix = one ADT constant; no kernel patch needed at all.**
+- XNU chooses the **VM page size at runtime** (`osfmk/arm/arm_init.c`, stock Apple):
+  `if (args->memSize > 1 GiB) PAGE_SHIFT_CONST = PAGE_MAX_SHIFT (14)` else `ARM_PGSHIFT`
+  (the MMU granule). `PAGE_SHIFT` is that runtime variable for non-16K-PG builds
+  (`osfmk/mach/arm/vm_param.h:66-71`, `PAGE_SHIFT_CONST` = `extern int`
+  `arm64/arm_vm_init.c:315`). So a 4 KiB-granule SoC (A53/A57, no TGran16) still runs
+  **16 KiB VM pages (PAGE_RATIO 4)** when the boot deck declares > 1 GiB of RAM.
+- Read the payload header of the actual boot deck (`out-rpm.img`, `SWEETXNU` payload,
+  `shim/loader.c:124` feeds it to `boot_args.memSize`): **phys 0x80000000, mem_size
+  0x40000000 = exactly 1 GiB**. `arm_init` compares strictly `>`, so 1.0 GiB ⇒ 4K VM
+  ⇒ stock `cs_validate_codedirectory()` (accepts `PAGE_SHIFT_4K` and `PAGE_SHIFT=12`)
+  rejects the 16 KiB-hashed DSC (`page shift: 14`, raw3). That is also where NOTES used
+  to say "PAGE_SHIFT (=12 on the 4 KiB t290/8994 builds)" — wrong: PAGE_SHIFT is runtime.
+- The vt20 ADT generator hard-codes it: `t290/tools/mkadt_t290.py:27`
+  `PHYS_BASE, MEM_SIZE = 0x80000000, 0x40000000`. The working tablet boots (lock screen,
+  CI 39422813087) had a deck with 1.5 GiB (`t290/NOTES`: "RAM 0xa0000000+1.5 ГБ") ⇒
+  `PAGE_SHIFT=14` ⇒ the stock gate accepted the SAME 20H392 DSC **natively with full
+  per-page validation; no CD-acceptance patch ever existed for those boots**. So
+  "the tablet booted on 4K pages" was hardware-granule-true, VM-false. This also
+  retro-explains patch 0110's comment ("4K armor + 16K VM pages, PAGE_RATIO 4,
+  write_pte_fast panic" — that panic is only possible in 16K-VM mode).
+- **Fix applied (committed below): `mkadt_t290.py` MEM_SIZE 0x40000000 → 0x60000000**
+  (= the whole real upper bank 0x80000000–0xDFFFFFFF; splash FB at 0x03400000 stays
+  outside the claim; no collisions; correct fits a Lumia deck).
+- Expected on the next boot (regen ADT + rebuild payload/deck with the SAME kernel
+  binary — page size is a BootArgs decision, so **no CI kernel build is needed** — then
+  flash, card after fastboot, `cp raw raw-<label>` diligence):
+  1. no `page shift: 14` print; DSC registers and validates FULLY per 16K VM page.
+  2. the raw/raw2 `cs_invalid_page`/`Text page corruption` storm (~230/boot) should
+     VANISH — it was caused by 0117's per-page skip (csb_hash_pageshift 14 > PAGE_SHIFT 12
+     ⇒ every DSC page unvalidated ⇒ kill on first fault) on the 4K-VM kernel.
+  3. `CS_PLATFORM_BINARY` question re-investigated under 16K VM before any further AMFI
+     debug edits (0035 print plan on hold).
+  4. 0117 stays in the chain, inert under 16K VM (14 !> 14, acceptance clause redundant);
+     revert later for cleanliness if desired.
+- Table-turn: `gh` is NOT installed on this Linux box and the tablet CI runs
+  (39412629412 / 39418230815 / 39422813087) live in the private fork (API 404
+  unauthenticated) — the tablet-side records could not be queried locally; the
+  payload of out-rpm.img + xnu-8796 source were decisive instead.
+
+**[SUPERSEDED BY THE ~16:30 UPDATE ABOVE — the acceptance patch was a workaround for our
+1-GiB deck, not a law. Kept as the raw3 record.]**
 **UPDATE (2026-10-23 ~15:00, pstore `raw3`): the 16K-CD acceptance patch is REQUIRED for the
 iPadOS root too — never drop it from the CI chain.**
 - 0116 was dropped from the CI chain (commit 97a3854 "damn you, boot" moved
@@ -51,9 +93,9 @@ iPadOS root too — never drop it from the CI chain.**
   enforcement keys only on taint). Applied + `git apply` verified against the
   fully-patched /tmp/opencode/xnu-verify tree; no other patch touches
   ubc_subr.c. iPadOS roots / 16K builds unaffected (pure acceptance superset).
-- NEXT: push → CI kernel → repack with the SAME vt20 ADT + SAME cmdline
-  (no new args) →`out-cs.img` → boot, card inserted after fastboot. Expect the
-  cache to register; the next blocker is whatever iPhone X userspace wants next.
+- NEXT: ~~push → CI kernel → repack…~~ superseded by the ~16:30 update: rebuild the
+  deck with a > 1 GiB ADT (mkadt_t290.py fix) + SAME kernel + SAME cmdline → boot →
+  judge. Fallback if the 16K-VM boot misbehaves: 0117 acceptance remains runnable.
   Fallback if 0116 fails: run the iPadOS 16.7.16 (iPad6,11) root path
   (`tools/mkiosroot.sh` + `mkroot-ipad5.sh` dmg list OS=087-86634-044.dmg,
   SystemOS=087-86624-047.dmg, AppOS=087-86715-047.dmg) — proven to lock screen

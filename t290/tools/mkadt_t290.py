@@ -24,7 +24,13 @@ NCPUS = 8                     # 4x Cortex-A53 + 4x Cortex-A57
 CPU_HZ = 2000000000
 
 # Base RAM and size (3 GiB mapping for Lumia 950 XL)
-PHYS_BASE, MEM_SIZE = 0x80000000, 0x40000000
+# MEM_SIZE must exceed 1 GiB: arm_init.c picks the VM page size at boot by
+# RAM size (memSize > 1 GiB -> PAGE_SHIFT_CONST = PAGE_MAX_SHIFT = 14, i.e.
+# 16 KiB VM pages over the 4 KiB MMU granule). At exactly 1 GiB the kernel
+# ran 4 KiB VM pages and stock cs_validate_codedirectory() rejected the
+# 16 KiB-hashed iPadOS shared cache (raw3). 0x60000000 = the whole upper
+# DDR bank 0x80000000-0xDFFFFFFF.
+PHYS_BASE, MEM_SIZE = 0x80000000, 0x60000000
 
 # Splash framebuffer based on the LK relocation: 0x03400000
 # Lumia 950 XL resolution: 1440x2560 (1440 * 2560 * 4 = 0x00e10000)
