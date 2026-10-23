@@ -10,7 +10,48 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
-**CORRECTION (2026-10-23 evening): the earlier "Cortex-A57 quirk, cpu0" wording in this entry and in 0118 was WRONG — `panic(cpu 0)` is a Cortex-A53. See the CORRECTED MECHANISM section below.**
+**CORRECTION 2 (2026-10-23 late, post-regression of the MIG story — READ FIRST):
+the "alignment fault (DFSC=2)" reading of raw4 is likely WRONG and the 8576/MIG
+attribution in the conversation was WRONG. Static recon facts (all verified in
+`xnu/out/kernel.development.sweet` + `/tmp/opencode/xnu-verify` source):**
+- **8576 (0x2180) is NOT a MIG reply size.** Parsed every `mig_subsystem` table
+  in the kernel binary ( verifier: `_UNDReply_subsystem` start=6200 end=6202
+  maxsize=44, stub=__XUNDAlertCompletedWithResult_rpc — layout
+  {server,start,end,maxsize,rsv,routine[].40B} confirmed). Largest replies
+  anywhere: 5236 (exc raise), 5232 (thread state), 5168 (voucher), 4144… No
+  8576 anywhere. → x13/x14=0x2180 were context remnants, NOT `ptr->size`; the
+  "IKit 8576-byte reply / IOService dump" theory is dead.
+- **mig_buckets[680] = `mach_vm_read` (mach_msg id 4804).** mig_e[0]
+  registers mach_vm_subsystem (start 4800); 4800..4805 → buckets 676..681
+  (4804%1031=680, no displacement). Table row: id 4804 stub=__Xmach_vm_read
+  max_reply=**64**. x27=mig_buckets+0x3fc0=680*24 exact.
+- **So the faulting copy fits `mach_vm_read` reading 64 bytes OUT of another
+  task's map**: kernel path mach_vm_read → vm_map_copyin → for len<=
+  msg_ool_size_small → `vm_map_copyin_kernel_buffer` (vm_map.c:10904)
+  → `copyinmap(src_map=foreign map, 0x206de9578, kdata(from kalloc_data 64),
+  64)` → vm_map_switch(owning map) → _bcopyin. Matches x8=x20=0x40,
+  x1=x21=x25=kalloc window 0xfffffff5..., x22=user VA unaligned-16,
+  cross-map stack (not a malformed OOL port descriptor).
+- **DFSC=0b000010 in the current DDI 0487 long-descriptor table is NOT
+  "alignment fault" — it is "Address size fault, level 2"** (alignment=0x21,
+  matching the fork's FSC_ALIGNMENT_FAULT=0x21 in proc_reg.h:1793). The
+  fork's `is_vm_fault` covers 0x04-0x0F only; **DFSC 0x00-0x03 has NO case
+  in sleh's classification at all** → falls through to the catch-all
+  `panic_with_thread_kernel_state("Kernel data abort.", state)`
+  (sleh.c:1635) — exactly raw4's string, despite copyio recovery being armed
+  (find_copyio_recovery_entry(__bcopyin+0x18)=true, recovery only checked
+  inside matched branches).
+- **So raw4's immediate cause: the fork classifies a DFSC=2 kernel abort as
+  unclassified and panics instead of faulting.** Whether silicon means
+  address-size-L2 (current DDI → suspect the foreign pmap's L2 descriptor)
+  or the 2013-2018-era manual semantics (alignment=0b000010 → suspect a
+  DEVICE-typed page at 0x206de000 read unaligned; fork's SCTLR default has
+  no A-bit set) is still open — this decode decides the mechanism.
+- Next-discipline: NO kernel change before the DFSC decode is settled;
+  discriminator options: (a) diagnostic printf of fault_code+name in the
+  sleh catch-all (one CI boot), (b) 0118-as-experiment boot (separates
+  pair-width vs page-type access fault). 0118 stays a dodge-not-fix either
+  way. First confirm which reading is right BEFORE touching pmap/recovery.
 
 **UPDATE (2026-10-23 ~18:00, pstore `raw4`): boot on the 0x60000000 ADT = 16K VM mode CONFIRMED IN THE FIELD; huge progress, new wall = alignment fault (DFSC=2) on Apple's 8-aligned LDP/STP pair in `_bcopyin`, on core 0.**
 - Confirms the ~16:30 analysis end-to-end: **no** `page shift: 14` anywhere, **no**
