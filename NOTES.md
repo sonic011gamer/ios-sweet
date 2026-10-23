@@ -93,6 +93,69 @@ attribution in the conversation was WRONG. Static recon facts (all verified in
   /tmp/opencode/xnu-verify (checks file osfmk/arm64/sleh.c, applies after
   0004/0017/0101's unrelated hunks in sleh_irq).
 
+**UPDATE (2026-10-23 ~23:00, pstore `raw5`): boot WITH 0118+0119 — the
+bcopyin abort is GONE, boot progressed well past the raw4 wall, and NO
+panic occurred. raw5 = dump of record for the non-panicking state (the
+512 KiB window this time starts inside the console ring, offset 0 is
+mid-line `|backboardd| IOServiceMatchingfailed…`, no panic record in
+the window and none reported by the user — screen went black, which is
+EXPECTED with `sweetfb_noconsole=1` + no panic: nothing asks the
+framebuffer to draw).**
+- **DFSC decode question: SETTLED → Reading B (alignment-class
+  semantics).** 0119's FSC= string is absent ⇒ the sleh catch-all was
+  never reached ⇒ the abort did not occur, and 0118's narrower 8-byte
+  accesses let copyinmap through. An instruction-encoding change cannot
+  cure a walk-time (address-size L2) fault, so DFSC=0b000010 on this
+  A53 behaves as the A53-era "alignment" class: the fault was
+  access-time, on the 16-byte LDP pair at the 8-aligned VA
+  0x206de9578 — a user page at 0x206de000 in the victim map that is
+  (presumably) Device-typed or otherwise rejects the 16B pair.
+  Consequence: 0118 is no longer an unverified dodge — it is now a
+  verified workaround for an understood ISA-level condition; keep it,
+  and keep 0119's diagnostic armed for any future kernel abort.
+- raw5 userland content proves progress: `exec xpcproxy` / `exec
+  bluetoothd` / `exec OTATaskingAgent` / SWEET AMFI entitlement dumps /
+  `exec fairplayd.A2` + AKS shim traffic, and — new vs raw4 —
+  **`SWEET SURF: backboardd create id 17 1536x2048 fmt 0x42475241
+  (ARGB) bpe 4 bpr 6144 planes 0 size 12582912 keys 10 -> 0x0`** (and id
+  18 1125x2436) — backboardd CREATED framebuffer surfaces via the SWEET
+  FB shim (success returns). Screen geometry reported is the template
+  ADT's (iPad-like 1536x2048), not the Lumia panel's 1440x2560; display
+  bring-up remains a later milestone.
+- **Two NEW userland crashes (exec-time, IDENTICAL for both procs,
+  before the spam flood tail):** `CRASH routined[193]` and `CRASH
+  clipserviced[194]`, both: pc 0x1d2c20ee4 lr 0x1d2c2abcc
+  bt 0x1d2c2abfc 0x1d2bd3f1c…, slide 0x2e63c000, reason ns 6 code 0x9:
+  **"malformed load command #43 of 45 at 0x215450860 with
+  mh=0x21544f000, size (0x78206365) not multiple of 4"** → launchd
+  "Too many corpses being created".
+- Key forensic bit: 0x78206365 little-endian = bytes `65 63 20 78` =
+  ASCII **"ec x"** — a fragment of OUR OWN console line `exec x**c x**pcproxy`
+  (0042-sweet-short-exec-log). Console text should never appear inside
+  a Mach-O load command → hypothesis (NOT yet proven): a page of a
+  Mach-O image in RAM was overwritten by console/log text — i.e. a
+  kernel-side scribble; alternative: the file/page from the SD root is
+  bad, or a DMA/coherency misdelivery. 74 occurrences of the byte
+  pattern exist in raw5, all in console text, consistent with the ring
+  buffer dominating RAM pages near the capture.
+- To settle scribble-vs-disk WITHOUT a kernel change: pull the crash
+  reporter logs from the SD root (`/var/mobile/Library/Logs/
+  CrashReporter/*routined*.ips` and *clipserviced*) after the next
+  boot, and `dd` the bytes of the file dyld parsed (binary identity
+  still unknown — mh 0x21544f000 lies in the shared-cache/0x21xxxxxxxx
+  region) to compare on-disk vs in-RAM. If disk is clean → RAM
+  scribble; hunt then points at the console/msgbuf/VM page-provisioning
+  path (same family as the old raw/raw2 cs corruption storm, but tiny).
+- Console-ring tail (last activity in the record) is a continuing loop
+  of `|backboardd| IOServiceMatchingfailed for: AppleM2ScalerCSCDriver`
+  — OleDb-expected on a non-Apple display stack (template ADT), volume
+  of spam alone (200+ KB of the 512 KiB window) is not yet established
+  as a wedge vs. periodic retries. System was NOT confirmed wedged —
+  user's report: black screen, no logs, no panic.
+- User's uncommitted mkboot changes during this boot (left as-is):
+  added `sweet_amfi_debug=1`, `sweetfb_hz` 30→60; `sweetfb_noconsole=1`
+  predates this boot.
+
 **UPDATE (2026-10-23 ~18:00, pstore `raw4`): boot on the 0x60000000 ADT = 16K VM mode CONFIRMED IN THE FIELD; huge progress, new wall = alignment fault (DFSC=2) on Apple's 8-aligned LDP/STP pair in `_bcopyin`, on core 0.**
 - Confirms the ~16:30 analysis end-to-end: **no** `page shift: 14` anywhere, **no**
   `cs_blob ... 85` / cache-registration failure; the stock gate accepted the 16K-hashed
