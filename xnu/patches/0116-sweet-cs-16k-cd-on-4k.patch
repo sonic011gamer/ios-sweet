@@ -1,0 +1,48 @@
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+index 9b553be..c78d366 100644
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -124,6 +124,7 @@ ZONE_DEFINE_ID(ZONE_ID_CS_BLOB, "cs_blob zone", struct cs_blob,
+ extern int cs_debug;
+ 
+ #define PAGE_SHIFT_4K           (12)
++#define PAGE_SHIFT_16K          (14)
+ 
+ static boolean_t
+ cs_valid_range(
+@@ -371,7 +372,16 @@ cs_validate_codedirectory(const CS_CodeDirectory *cd, size_t length)
+ 	if (ntohl(cd->magic) != CSMAGIC_CODEDIRECTORY) {
+ 		return EBADEXEC;
+ 	}
+-	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT)) {
++	/*
++	 * iPhone X-class (A11) systems run their kernel with 16 KiB pages, so
++	 * their shared caches hash the CodeDirectory pages at 16 KiB. This
++	 * kernel runs 4 KiB pages but is deliberately allowed to register such
++	 * a signature: cs_validate_hash() cannot split a 16 KiB page on a 4 KiB
++	 * VM (it needs the whole 16 KiB to re-hash), so these caches validate
++	 * as "unvalidated" (executing is fine, only a taint kills).
++	 */
++	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT) &&
++	    (cd->pageSize != PAGE_SHIFT_16K)) {
+ 		printf("disallowing unsupported code signature page shift: %u\n", cd->pageSize);
+ 		return EBADEXEC;
+ 	}
+@@ -5705,6 +5715,17 @@ cs_validate_hash(
+ 			continue;
+ 		}
+ 
++		/*
++		 * A code directory hashed for VM pages larger than ours (16 KiB
++		 * iPhone X-era caches on this 4 KiB kernel) cannot be validated
++		 * one of our pages at a time. Leave the page unvalidated: the
++		 * blob is still registered (cdhash known, entitlements parsed),
++		 * pages execute, and only signature taint ever kills.
++		 */
++		if (blob->csb_hash_pageshift > PAGE_SHIFT) {
++			continue;
++		}
++
+ 		/* blob data has been released */
+ 		kaddr = (vm_offset_t)blob->csb_mem_kaddr;
+ 		if (kaddr == 0) {
