@@ -10,6 +10,42 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
+**UPDATE (2026-10-23 ~18:00, pstore `raw4`): boot on the 0x60000000 ADT = 16K VM mode CONFIRMED IN THE FIELD; huge progress, new wall = Qualcomm A57 alignment fault on Apple's unaligned LDP/STP pair in `_bcopyin`.**
+- Confirms the ~16:30 analysis end-to-end: **no** `page shift: 14` anywhere, **no**
+  `cs_blob ... 85` / cache-registration failure; the stock gate accepted the 16K-hashed
+  DSC at runtime `PAGE_SHIFT=14`. launchd + fleet spawn: backboardd (IOK match spam),
+  fairplayd.A2, rapportd, ACCHWComponentAuthService etc. The raw/raw2 corruption storm
+  is GONE (as predicted — it was 0117's unvalidated-page skip on the 4K-VM kernel):
+  `cs_invalid_page` down from ~230/boot to exactly 1, `Text page corruption` absent.
+- NEW WALL: `panic(cpu 0 caller 0xfffffff007ac094c): Kernel data abort.
+  pc 0xfffffff00742e00c = _bcopyin+0x18 (ldp x3,x4,[x0],#0x10),
+  lr 0xfffffff007376c40 = copyinmap+0x70 (right after bl _copyin),
+  esr 0x96000002 (alignment fault), far 0x0000000206de9578 — 8-byte aligned,
+  so the X-pair straddles a 16-byte atomic boundary; src is a user VA of the map
+  copyinmap switched into (vm_map_switch), len x2=0x30; MIG bucket in the regs.
+  The trailing `handshake structure not initialized` is only the kernel-coredump
+  console stage (osfmk/kdp/output_stages/out_shmem.c:499), not the crash site.
+- Mechanism (stock Apple asm unmodified by our chain): `_bcopyin`/`_bcopyout`
+  (`osfmk/arm64/machine_routines_asm.s`) copy 16 bytes per iteration with an
+  **LDP/STP 64-bit pair at an address that is only 8-byte aligned**. Apple silicon
+  and Cortex-A53 tolerate the split pair (all previous successes ran on them:
+  tablet boots, t290 A53, SM7150 A77/A55); msm8994's cpu0 is a **Cortex-A57**,
+  which alignment-faults. No earlier Lumia boot got far enough to exercise
+  user-space copyin pairs (raw/raw2 panicked before the fleet).
+- Fix: **`xnu/patches/0118-sweet-bcopyio-no-unaligned-ldp-pair.patch`** (next free
+  number, CI chain applies it after 0117): both 16B loops in `_bcopyin` and
+  `_bcopyout` become two 8-byte `ldr/str` (post-index preserved, byte-loop tail and
+  COPYIO_RECOVER_RANGE untouched). Verified to apply cleanly against the pristine
+  xnu-8796 file (`ios-cityman2/research/xnu-8796` copy is byte-identical to the
+  verify-tree base; the file is untouched by patches 0001-0117). Optional later
+  optimization: an aligned-16 fast path that re-enables the pair.
+- NEXT: push → CI → repack deck (SAME ADT + SAME cmdline, kernel from the new build)
+  → `fastboot boot`, card after fastboot → new pstore dump (remember `cp raw raw-<label>`
+  BEFORE the next boot). Expect the copyin abort gone; next blocker = whatever the
+  MIG/IOKit traffic surfaces after that.
+- One isolated `cs_invalid_page` in raw4 (the only one): revisit after the fix — if
+  it stays a single event it is noise, not the old storm.
+
 **UPDATE (2026-10-23 ~16:30): ROOT CAUSE of the cs page-shift saga FOUND — the Lumia deck's boot_args.memSize is EXACTLY 1 GiB, so the kernel self-selects 4 KiB VM pages. Fix = one ADT constant; no kernel patch needed at all.**
 - XNU chooses the **VM page size at runtime** (`osfmk/arm/arm_init.c`, stock Apple):
   `if (args->memSize > 1 GiB) PAGE_SHIFT_CONST = PAGE_MAX_SHIFT (14)` else `ARM_PGSHIFT`

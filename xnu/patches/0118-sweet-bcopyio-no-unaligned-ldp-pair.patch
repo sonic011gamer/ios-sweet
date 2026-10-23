@@ -1,0 +1,42 @@
+diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
+index 2449334..4aa968a 100644
+--- a/osfmk/arm64/machine_routines_asm.s
++++ b/osfmk/arm64/machine_routines_asm.s
+@@ -459,9 +459,16 @@ LEXT(_bcopyin)
+ 	b.lt	2f
+ 	sub		x2, x2, #16
+ 1:
+-	/* 16 bytes at a time */
+-	ldp		x3, x4, [x0], #16
+-	stp		x3, x4, [x1], #16
++	/* 16 bytes at a time, split into two single 8-byte accesses: a
++	 * 64-bit LDP/STP pair whose address is only 8-byte aligned (so it
++	 * straddles a 16-byte atomic boundary) alignment-faults on
++	 * Qualcomm's Cortex-A57 (msm8994 boots: copyinmap -> _bcopyin).
++	 * Apple silicon and the Cortex-A53 tolerate the split pair.
++	 */
++	ldr		x3, [x0], #8
++	ldr		x4, [x0], #8
++	str		x3, [x1], #8
++	str		x4, [x1], #8
+ 	subs	x2, x2, #16
+ 	b.ge	1b
+ 	/* Fixup the len and test for completion */
+@@ -630,9 +637,14 @@ LEXT(_bcopyout)
+ 	b.lt	2f
+ 	sub		x2, x2, #16
+ 1:
+-	/* 16 bytes at a time */
+-	ldp		x3, x4, [x0], #16
+-	stp		x3, x4, [x1], #16
++	/* 16 bytes at a time, split into two single 8-byte accesses: the
++	 * destination is a user address here, and the same LDP/STP pair
++	 * hazard as in _bcopyin applies (Qualcomm Cortex-A57 alignment
++	 * fault on an 8-byte-aligned split pair). */
++	ldr		x3, [x0], #8
++	ldr		x4, [x0], #8
++	str		x3, [x1], #8
++	str		x4, [x1], #8
+ 	subs	x2, x2, #16
+ 	b.ge	1b
+ 	/* Fixup the len and test for completion */
