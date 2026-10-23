@@ -10,6 +10,29 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
+**UPDATE (2026-10-23 ~15:00, pstore `raw3`): the 16K-CD acceptance patch is REQUIRED for the
+iPadOS root too — never drop it from the CI chain.**
+- 0116 was dropped from the CI chain (commit 97a3854 "damn you, boot" moved
+  `xnu/patches/0116-sweet-cs-16k-cd-on-4k.patch` → `patches_after1stboot/`, which CI
+  excludes) on the assumption "4K should load without it" for the iPadOS root. Boot with
+  the drop (`raw3`, card = ipad16 root): SAME failure as the iPhone10,3 root — the
+  j71sap/iPad6,11 dyld shared cache declares `page shift: 14` (16 KiB hashing) →
+  `unable to create a validated cs_blob object: 85` → `code signature registration for
+  shared cache failed` → `Library not loaded: /usr/lib/libSystem.B.dylib (no dyld cache)`
+  → `initproc failed to start` panic.
+- Why: iOS 13+ ships ALL 64-bit shared caches hashed at 16 KiB, A9/iPad6,11 included
+  (its own kernel runs 16K VM pages). There is no 4K-page iOS 16 cache to build a root
+  from. msm8994 A57/A53 do not support a 16K MMU granule (4K/64K only; see t290/NOTES
+  A53 observation) → a native 16K kernel like the tablet's lock-screen proof
+  (t290/NOTES "userland iPadOS executed on a 16K kernel") is impossible on this
+  silicon. CD-acceptance on the 4K kernel is the only route to iOS 16.7 userspace here.
+- Fix: restored to the CI chain as `xnu/patches/0117-sweet-cs-16k-cd-on-4k.patch`
+  (same content as 71c0e10; no other CI patch touches ubc_subr.c; the user's own
+  `0116-t290-display-shadow.patch` in `xnu/patches/` is untouched).
+- Earlier statement "iPhone10,3 root only for 16K kernels" in this section was wrong —
+  every iOS 16.7 root needs the acceptance on a 4K kernel; the two roots differ in
+  environmental fixes, not in CD page size.
+
 **UPDATE: iPhone10,3 root is BACK ON the 4K kernel — patch 0116 (commit 71c0e10).**
 - Boot of `out-rpm.img` reached: HFS+ root mounted rw (`vol=iOSRoot`), launchd ran,
   ignition started; dyld cache directory found, then
