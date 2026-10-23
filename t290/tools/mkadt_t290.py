@@ -56,7 +56,7 @@ def child(n, name):
             return c
     raise SystemExit(f'mkadt.py tree has no {name!r} node')
 
-def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1, native=False):
+def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1, native=False, seed_file=None):
     root = mkadt.build(qemu=qemu)
     gicd, gicc, timebase, vtimer = ((QEMU_GICD, QEMU_GICC, QEMU_TIMEBASE, QEMU_VTIMER_INTID)
                                     if qemu else (GICD, GICC, TIMEBASE, VTIMER_INTID))
@@ -130,13 +130,30 @@ def build(qemu=False, fb_w=FB_W, fb_h=FB_H, qemu_cpus=1, native=False):
     set_props(root, compatible=cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
               cstr('microsoft,cityman') + cstr('qcom,msm8994') + cstr('AppleARM'),
               model=cstr('iPhone10,3'), target_type=cstr('D22'), target_sub_type=cstr('D22AP'))
+
+    # Pin /chosen/random-seed from a file so regenerated ADTs are byte-identical
+    # to the shipped one (default: the seed extracted from the booted vt20 image).
+    if seed_file is None:
+        default_seed = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'seed-cityman-vt20.bin')
+        if os.path.exists(default_seed):
+            seed_file = default_seed
+    if seed_file:
+        seed = open(seed_file, 'rb').read()
+        chosen = child(root, 'chosen')
+        for i, (k, f, v) in enumerate(chosen.props):
+            if k == 'random-seed':
+                chosen.props[i] = (k, f, seed)
+                break
     return root
+
 
 if __name__ == '__main__':
     fb = sys.argv[sys.argv.index('--fb') + 1] if '--fb' in sys.argv else f'{FB_W}x{FB_H}'
+    seed_file = sys.argv[sys.argv.index('--seed-file') + 1] if '--seed-file' in sys.argv else None
     w, h = (int(x) for x in fb.split('x'))
     smp = int(sys.argv[sys.argv.index('--smp') + 1]) if '--smp' in sys.argv else 1
-    root = build(qemu='--qemu' in sys.argv, fb_w=w, fb_h=h, qemu_cpus=smp, native='--native' in sys.argv)
+    root = build(qemu='--qemu' in sys.argv, fb_w=w, fb_h=h, qemu_cpus=smp,
+                 native='--native' in sys.argv, seed_file=seed_file)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
