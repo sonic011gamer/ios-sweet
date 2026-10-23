@@ -10,7 +10,9 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
-**UPDATE (2026-10-23 ~18:00, pstore `raw4`): boot on the 0x60000000 ADT = 16K VM mode CONFIRMED IN THE FIELD; huge progress, new wall = Qualcomm A57 alignment fault on Apple's unaligned LDP/STP pair in `_bcopyin`.**
+**CORRECTION (2026-10-23 evening): the earlier "Cortex-A57 quirk, cpu0" wording in this entry and in 0118 was WRONG — `panic(cpu 0)` is a Cortex-A53. See the CORRECTED MECHANISM section below.**
+
+**UPDATE (2026-10-23 ~18:00, pstore `raw4`): boot on the 0x60000000 ADT = 16K VM mode CONFIRMED IN THE FIELD; huge progress, new wall = alignment fault (DFSC=2) on Apple's 8-aligned LDP/STP pair in `_bcopyin`, on core 0.**
 - Confirms the ~16:30 analysis end-to-end: **no** `page shift: 14` anywhere, **no**
   `cs_blob ... 85` / cache-registration failure; the stock gate accepted the 16K-hashed
   DSC at runtime `PAGE_SHIFT=14`. launchd + fleet spawn: backboardd (IOK match spam),
@@ -25,13 +27,37 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
   copyinmap switched into (vm_map_switch), len x2=0x30; MIG bucket in the regs.
   The trailing `handshake structure not initialized` is only the kernel-coredump
   console stage (osfmk/kdp/output_stages/out_shmem.c:499), not the crash site.
-- Mechanism (stock Apple asm unmodified by our chain): `_bcopyin`/`_bcopyout`
-  (`osfmk/arm64/machine_routines_asm.s`) copy 16 bytes per iteration with an
-  **LDP/STP 64-bit pair at an address that is only 8-byte aligned**. Apple silicon
-  and Cortex-A53 tolerate the split pair (all previous successes ran on them:
-  tablet boots, t290 A53, SM7150 A77/A55); msm8994's cpu0 is a **Cortex-A57**,
-  which alignment-faults. No earlier Lumia boot got far enough to exercise
-  user-space copyin pairs (raw/raw2 panicked before the fleet).
+- CORRECTED MECHANISM (the old "msm8994 cpu0 is a Cortex-A57" claim is refuted —
+  DO NOT repeat it):
+  - cpu0 is a **Cortex-A53**, proven three ways: (1) the real device tree
+    `msm8994-msft-lumia-octagon-cityman.dtb` decompiles to cpu@0-3 =
+    `arm,cortex-a53` reg `<0 0x0..0x3>` (cluster0) and cpu@100-103 = `arm,cortex-a57`
+    (cluster1, MPIDR 0x100-0x103) — exactly what `t290/tools/mkadt_t290.py:86-88`
+    encodes; (2) patch `0115`'s SweetCPU check pins the boot CPU to ADT cpu0
+    (phys_id 0x0) and raw4 passed it; (3) boot logs show `cpu1 CPU_ON target=0x1`
+    from the boot core at mpidr 0x0. So `panic(cpu 0)` = A53.
+  - Per the ARMv8.0+ architecture, pair alignment is **per element**: an
+    LDP/STP of two 64-bit values needs 8-byte alignment only (ARM ARM B2.8.2
+    pseudocode `IsAlignedSize(address, half DIV 8)`; FEAT_LSE2 changed nothing
+    here for non-exclusive pairs). The faulting address 0x206de9578 is
+    8-byte aligned, so this access is architecturally legal on normal memory
+    — and the t290 tablet (4×A53) ran the identical `_bcopyin` pairs through
+    the whole 16K-VM 16.7.16 fleet for 20+ min with no fault. The raw4 fault
+    is therefore **not** a generic "A57 vs A53" or stock-arch story; the
+    mechanism is still open.
+  - Open candidates: (a) the faulting page is not normal-typed in the map
+    `copyinmap` switched into (a Device- or NC-attributed user mapping would
+    be Lumia-specific; no culprit found — 0116's shadow/panel buffers are
+    kernel-side only, no user mapping in the chain); (b) undocumented
+    msm8994 silicon/interconnect behavior. Minor anomaly on file: saved
+    `cpsr 0x20000204` decodes as EL1t + DAIF(D, bit2) instead of EL1h —
+    worth re-checking on the next dump.
+  - PRAGMATIC FIX unchanged: 0118 splits the pair into single 8-byte
+    `ldr/str`. Single 8B accesses at 8-byte alignment are legal on ANY
+    memory type on ANY ARMv8 core, so the wall is bypassed regardless of
+    which mechanism turns out to be real; the next boot's dump tells us
+    more (if single 8B accesses also fault → the page really is not
+    normal-typed → hunt the mapping).
 - Fix: **`xnu/patches/0118-sweet-bcopyio-no-unaligned-ldp-pair.patch`** (next free
   number, CI chain applies it after 0117): both 16B loops in `_bcopyin` and
   `_bcopyout` become two 8-byte `ldr/str` (post-index preserved, byte-loop tail and

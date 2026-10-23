@@ -9,11 +9,13 @@ index 2449334..4aa968a 100644
 -	/* 16 bytes at a time */
 -	ldp		x3, x4, [x0], #16
 -	stp		x3, x4, [x1], #16
-+	/* 16 bytes at a time, split into two single 8-byte accesses: a
-+	 * 64-bit LDP/STP pair whose address is only 8-byte aligned (so it
-+	 * straddles a 16-byte atomic boundary) alignment-faults on
-+	 * Qualcomm's Cortex-A57 (msm8994 boots: copyinmap -> _bcopyin).
-+	 * Apple silicon and the Cortex-A53 tolerate the split pair.
++	/* 16 bytes at a time, split into two single 8-byte accesses. On
++	 * msm8994 (raw4: copyinmap -> _bcopyin) a 64-bit LDP/STP pair at an
++	 * 8-byte-aligned address (straddling a 16-byte boundary) took an
++	 * alignment fault (esr 0x96000002), although per the ARMv8
++	 * architecture pair alignment is per element and identical pairs ran
++	 * fault-free on the A53 t290 tablet build. A single 8-byte access at
++	 * 8-byte alignment is legal on any memory type on any ARMv8 core.
 +	 */
 +	ldr		x3, [x0], #8
 +	ldr		x4, [x0], #8
@@ -30,9 +32,9 @@ index 2449334..4aa968a 100644
 -	ldp		x3, x4, [x0], #16
 -	stp		x3, x4, [x1], #16
 +	/* 16 bytes at a time, split into two single 8-byte accesses: the
-+	 * destination is a user address here, and the same LDP/STP pair
-+	 * hazard as in _bcopyin applies (Qualcomm Cortex-A57 alignment
-+	 * fault on an 8-byte-aligned split pair). */
++	 * destination is a user address here, and the same LDP/STP-pair
++	 * hazard as in _bcopyin applies (msm8994 alignment fault on an
++	 * 8-byte-aligned pair; single 8B accesses are always legal). */
 +	ldr		x3, [x0], #8
 +	ldr		x4, [x0], #8
 +	str		x3, [x1], #8
