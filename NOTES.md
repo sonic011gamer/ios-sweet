@@ -10,6 +10,35 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-23
 
+**UPDATE (later 2026-10-23): sdroot HFS+ root MOUNTED and launchd ran; new root image needed.**
+- Boot of `out-rpm.img` (card inserted after fastboot): HFS+ volume header read and
+  mounted rw (`hfs: set hardlink bit on vol=iOSRoot`); `libignition` ran, dyld cache
+  directory was found, then panic:
+  `disallowing unsupported code signature page shift: 14` → `unable to create a
+  validated cs_blob object: 85` → `code signature registration for shared cache failed`
+  → `Library not loaded: /usr/lib/libSystem.B.dylib (no dyld cache)` → launchd exit 1 →
+  panic `initproc failed to start`.
+- ROOT CAUSE (kernel source, no patch needed): `bsd/kern/ubc_subr.c`
+  `cs_validate_codedirectory()` accepts only `cd->pageSize == PAGE_SHIFT_4K (12)` or
+  `PAGE_SHIFT`. The t290/MSM8994 kernels build 4K pages (SWEET_BOARD=t290 = "4K pages +
+  GICv2") → they only accept 4K-paged code directories. The iPhone10,3 iOS 16.7.16
+  shared cache (A11 device, 16K pages) declares pageSize 14 → rejected. Validation
+  itself only supports 4k/16k granularity for VM page 16K; a 4K kernel CANNOT
+  validate 16K-CD pages (per-fault `cs_validate_page` gets only one 4K page of data).
+- The proven userland for 4K-page SWEET kernels is the **iPadOS 16.7.16 (20H392) root
+  from iPad6,11/iPad Air-2-class IPSW ("mkroot-ipad5.sh")**: `t290/NOTES.md` 2026-10-20
+  boots it on the t290 tablet with launchd + dozens of daemons + the LOCK SCREEN
+  (CI 39422813087). `mkadt_t290.py` already takes `/product` from the real iPad-5
+  (J71sAP) device tree — the Lumia bring-up was designed for the iPadOS root.
+- NEXT ACTION (no kernel change): download iPadOS 16.7.16 (20H392) IPSW for
+  iPad6,11, extract `OS=087-86634-044.dmg`, SystemOS=`087-86624-047.dmg`,
+  AppOS=`087-86715-047.dmg` (per `mkroot-ipad5.sh` header),
+  `tools/mkiosroot.sh OS.dmg SystemOS.dmg AppOS.dmg ios16-ipad-root.img 16G` +
+  `fsck.hfsplus -fy` + `tools/sweet-root-tweaks.py` (same flow as the iPhone root,
+  apfs-fuse + hfsprogs already on this machine), dd to the SD card, boot the same
+  `out-rpm.img` unchanged. Do NOT build the root from the iPhone10,3 IPSW on this
+  kernel line — that image is only for the 16K-page sweet-phone kernel (Readmi).
+
 **Panic root-caused and bootargs fixed; new image `out-new.img` awaits device test.**
 - Out-of-boot panic "Unaligned kernel data abort." (ESR 0x96000061): pc `gc_enable+0x540`
   (`stp q0,q0,[x5,#-0x10]`, new-clang vectorized stock `vc_clear_screen` fill, symbolized
