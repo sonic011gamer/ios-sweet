@@ -1,0 +1,56 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+deletedx a/orig/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 52401c1..74cea60 100644
+--- a/orig/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -201,9 +201,32 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+-		fLogicalW = SWEET_FB_LOGICAL_W;
+-		fLogicalH = SWEET_FB_LOGICAL_H;
++	/*
++	 * IOMobileFramebuffer.framework (iOS 16.7) reads canvas-width and
++	 * canvas-height from the disp0 provider. Presenting another size
++	 * makes CoreAnimation scale canvas -> display on every frame through
++	 * AppleM2ScalerCSCDriver (raw12: "IOServiceMatchingfailed for:
++	 * AppleM2ScalerCSCDriver" x676, raw13: x3343; no display session, no
++	 * swap(), black panel): the CSC is the only piece that performs that
++	 * transform. Present the provider canvas instead and let the swapEnd
++	 * copy place it centred on the panel (fOffX/fOffY, clipped in
++	 * swapEnd). Port of ios-taimen 0202-present-canvas-size.
++	 */
++	OSNumber *cw = OSDynamicCast(OSNumber, provider->getProperty("canvas-width"));
++	OSNumber *chp = OSDynamicCast(OSNumber, provider->getProperty("canvas-height"));
++	uint32_t canvasW = cw != NULL ? cw->unsigned32BitValue() : 0;
++	uint32_t canvasH = chp != NULL ? chp->unsigned32BitValue() : 0;
++	if (canvasW != 0 && canvasH != 0) {
++		IOLog("SWEET FB: provider canvas %ux%u\n", canvasW, canvasH);
++	}
++	if (!native) {
++		if (canvasW != 0 && canvasH != 0) {
++			fLogicalW = canvasW;
++			fLogicalH = canvasH;
++		} else if (fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++			fLogicalW = SWEET_FB_LOGICAL_W;
++			fLogicalH = SWEET_FB_LOGICAL_H;
++		}
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+@@ -218,6 +241,14 @@ AppleCLCD::start(IOService *provider)
+ 		OSSafeReleaseNULL(fWorkLoop);
+ 		return false;
+ 	}
++	if (fOffX < 0 || fOffY < 0) {
++		/* Black borders around the centred canvas; the panel memory
++		 * still holds the shim's screen. */
++		volatile uint64_t *px = (volatile uint64_t *)fPixels;
++		for (size_t i = 0; i < (size_t)fRowBytes * fHeight / 8; i++) {
++			px[i] = 0xff000000ff000000ULL;
++		}
++	}
+ 	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
+ 	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+ 		IOLog("SWEET FB: no vsync timer\n");
