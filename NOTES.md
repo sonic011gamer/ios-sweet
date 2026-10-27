@@ -8,7 +8,68 @@ shows almost black lock screen. Bounded shader/texture trace bridge staged
 on SD, awaiting next manual iPadOS boot. Kernel monotonic-time panic also
 observed; not fixed. No recovery reflash needed for staged diagnostic.
 
-### msm8994 (Lumia 950 XL) handoff — 2026-10-23
+### msm8994 (Lumia 950 XL) handoff — 2026-10-27 (0113 sdhc rework; read first)
+
+**UPDATE (2026-10-27): `xnu/patches/0113-t290-sdhc-root.patch` (sdhc2 microSD
+root) fully cross-checked against the proven LK2ND Lumia-950 drivers
+(`/home/snaccy/Lumia950/lk2nd/`) and the real Lumia octagon DTB, then improved;
+committed with these notes.**
+- **All msm8994 hardware constants in 0113 verified against LK2ND +
+  `msm8994-msft-lumia-octagon.dtsi` (cityman):** SDC2 core 0xF98A4000
+  (HC at +0x900), GCC SDCC2 registers 0x504–0x520 @ 0xFC400000, TLMM SDC2_HDRV_PULL_CTL 0xFD512048, SMEM 0x06A00000,
+  RPM msg RAM 0xFC428000, APCS IPC 0xF900D008; regulators LDOA id 21 (vmmc =
+  pm8994 L21a, 2.95 V) and id 13 (vqmmc = L13a, 2.95 V) — the DTB has
+  `vmmc-supply = <&vreg_l21a_2p95>`, `vqmmc-supply = <&vreg_l13a_2p95>`.
+  SMD framing identical to LK2ND `smd.c`/`rpm-smd.c`: 20-byte packet header
+  (size + 4 zeros), req magic 0x00716572, req_len = len+20, id, set 0, rtype,
+  rid, dataLen; ack = 0x28 bytes.
+- **Defect 1 (fixed): GPLL0 rate.** The clock tree used t290/SDM429 values
+  (GPLL0 = 800 MHz, prediv 16), but msm8994 GPLL0 = **600 MHz** (LK2ND
+  `msm8994-clock.c gpll0_clk_src.rate`): the card really ran at 18.75/37.5 MHz
+  instead of 25/50. Fix: prediv is now boot-arg driven — `sdpll=<MHz of
+  GPLL0>`, **default 600**, and `prediv = sdpll / 50` gives the same
+  expression for both rates (25 MHz = GPLL0/prediv with M/N 1/2 dual-edge,
+  50 MHz = GPLL0/prediv bypass; LK2ND's 8994 table uses /12). t290 still
+  reproducible with `sdpll=800`. **No Lumia cmdline change needed** (default
+  already 600); keep `sdrw=1` and `sdoff` as before.
+- **Defect 2 (fixed): rpm_req wait semantics.** Old code waited for RX head
+  movement since a snapshot — a reply parked in the FIFO *before* the
+  snapshot (nothing else lives on our RX side of rpm_requests) makes that
+  loop spin until ETIMEDOUT with the ack already unread. Rewritten to wait
+  for **unread data = (head − tail) % fifo_sz**, the LK2ND `smd.c` rule; the
+  timeout branch now also prints which req id got no answer.
+- LK2ND-precedent robustness improvements: **transfer-complete outranks
+  data-timeout** — `sd_xfer` ignores error-reg bit 0x10 (data timeout) when
+  INT_XFER is also set (LK2ND sdhci.c priority table; new `ERR_DAT_TIMEOUT`
+  define), only genuine other errors fail the transfer; **HC data timeout
+  counter 0x0E → 0x0F** (2^28 SDCLK ≈ 5.4 s at 50 MHz, LK2ND per-command
+  value); **SDC2 pad word** now programs `4 | 4<<3 | 7<<6 | 3<<9 | 3<<11 |
+  1<<15` — same drive/pull as before **plus RCLK pull-down (bit 15)**,
+  matching LK2ND `set_sdc_power_ctrl(2)` and Linux `sdc2_*_on` pin state.
+- Header comment rewritten: 0113 documents both boards (t290 origin,
+  msm8994 retarget) and the LK2ND cross-check; the "RPM did not acknowledge
+  L12/L11" print is now "L21/L13".
+- **Patch hygiene:** 0113 regenerated from the edited driver; first hunk
+  (`bsd/conf/files`) and third hunk (`iokit/bsddev/IOKitBSDInit.cpp`) are
+  byte-identical to the previous patch; the new-file hunk is now
+  `@@ -0,0 +1,999 @@`. Verified: pristine xnu-8796.141.3 clone
+  (`/tmp/opencode/verify2`, HEAD 1b191cb) + every patch of 0001–0120 in
+  numeric order → only 0031/0041 remain skipped locally because
+  0026-stage-hfs.sh needs the hfs-627.100.6 network fetch (unchanged, same
+  as before); the resulting `bsd/dev/sweet_sdhc.c` is byte-identical to the
+  edited driver. Local `tools/xnu-cc.py` syntax check NOT run (needs the
+  ~/swift Apple clang + CI buildtree, absent on this host) — CI's macOS
+  build is the compile gate; the edits are plain C (uint32_t locals,
+  PE_parse_boot_argn already used in the same file).
+- Next: push → CI xnu build → repack with the same cmdline + ADT →
+  `fastboot boot`, card in after fastboot, `cp raw raw-<label>` FIRST, then
+  parse. Watch for: RPM ack lines, new 50 MHz claim in the "card mid"
+  printf (sd.mhz printed via the high-speed branch), no new spurious
+  "RPM did not acknowledge" timeouts, and the mount result. The reported
+  earlier successful HFS+ mount happened with the wrong (37.5 MHz max)
+  clocks and the weaker rpm wait — that mount experience still stands as
+  an observation, unknown which error margins were used up.
+
 
 **CORRECTION 2 (2026-10-23 late, post-regression of the MIG story — READ FIRST):
 the "alignment fault (DFSC=2)" reading of raw4 is likely WRONG and the 8576/MIG

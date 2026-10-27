@@ -12,27 +12,36 @@ index e25254b..55025d3 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/sweet_sdhc.c b/bsd/dev/sweet_sdhc.c
 new file mode 100755
-index 0000000..25f7abe
+index 0000000..469cf55
 --- /dev/null
 +++ b/bsd/dev/sweet_sdhc.c
-@@ -0,0 +1,941 @@
+@@ -0,0 +1,999 @@
 +/*
-+ * SWEET microSD root device (SWEET_BOARD=t290: Galaxy Tab A 8.0, SDM429).
++ * SWEET microSD root device (iOS root on the sdhc2 card).
 + *
-+ * The tablet keeps Android on its eMMC; iPadOS lives on the microSD card in
-+ * sdhc2 (Qualcomm sdhci-msm, SDHCI 3.0). LK leaves that slot dead, so this
-+ * driver does what t290/shim/diag.c proved on the hardware:
-+ *   - card rails pm8953 L11 (card) and L12 (pads) belong to the RPM: reopen
-+ *     the rpm_requests SMD channel in SMEM and ask for 2.95 V on both
-+ *   - sdc2 pads: pull-ups on CMD/DAT, 16 mA clock
-+ *   - GCC SDCC2 AHB/apps clocks, 400 kHz from XO for identification, then
-+ *     25 MHz (GPLL0) and 50 MHz high speed when the card switches
-+ *   - SDHCI mode, power-control handshake of the Qualcomm core, card init,
-+ *     4-bit bus
-+ * Data moves with ADMA2 through a 1 MiB bounce buffer (CMD17/18/24/25, auto
-+ * CMD12), polled like the UFS and virtio drivers; the controller is not
-+ * cache coherent. The whole card is the volume (no partition table) unless
-+ * boot-arg sdoff=<sector> says where it starts. Writes need sdrw=1.
++ * Written for the Galaxy Tab A 8.0 (t290, SDM429, pm8953 L11/L12, GPLL0
++ * 800 MHz — LK leaves that slot dead, t290/shim/diag.c proved the rail,
++ * pad and clock sequences on that hardware) and now retargeted to the
++ * Lumia 950 XL (msm8994, pm8994 L21a=vmmc / L13a=vqmmc at 2.95 V, GPLL0
++ * 600 MHz). Every constant is cross-checked against LK2ND (Lumia-950
++ * checkout): msm8994/include/platform/iomap.h (peripheral bases, GCC
++ * SDCC2 offsets, TLMM SDC2_HDRV_PULL_CTL), msm8994-clock.c (GPLL0 rate
++ * and the 25/50 MHz RCG table), target/msm8994/init.c (pad drive/pull),
++ * smd.c/rpm-smd.c (channel layout, 20-byte packet header, req framing),
++ * sdhci.c (command flow, transfer-complete > data-timeout rule) and the
++ * real msm8994-msft-lumia-octagon device tree (sdhc2 supplies).
++ *
++ * Card rails belong to the RPM: reopen the rpm_requests SMD channel in
++ * SMEM and ask for 2.95 V on both; sdc2 pads get pull-ups on CMD/DAT and
++ * a 16 mA clock; GCC SDCC2 AHB/apps clocks, 400 kHz from XO for
++ * identification, then 25 MHz (GPLL0) and 50 MHz high speed when the
++ * card switches; SDHCI mode with the power-control handshake of the
++ * Qualcomm core, card init, 4-bit bus.
++ * Data moves with ADMA2 through a 1 MiB bounce buffer (CMD17/18/24/25,
++ * auto CMD12), polled like the UFS and virtio drivers; the controller
++ * is not cache coherent. The whole card is the volume (no partition
++ * table) unless boot-arg sdoff=<sector> says where it starts. Writes
++ * need sdrw=1. sdpll=<MHz> overrides the GPLL0 rate (default 600).
 + * Root with rd=sdroot0.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
@@ -105,6 +114,7 @@ index 0000000..25f7abe
 +#define INT_CMD                 0x0001
 +#define INT_XFER                0x0002
 +#define INT_ERR                 0x8000
++#define ERR_DAT_TIMEOUT         0x0010  /* error reg (+0x32) bit 4: data timeout */
 +
 +#define XFER_DMA                0x01
 +#define XFER_BLKCNT             0x02
@@ -316,7 +326,6 @@ index 0000000..25f7abe
 +	if (room < pkt_len + 20) {
 +		return 0;
 +	}
-+	uint32_t rx_before = hch(sd.smd_rx, HC_HEAD);
 +
 +	smd_put(&head, pkt_len);                /* SMD packet header */
 +	for (int i = 0; i < 4; i++) {
@@ -339,16 +348,27 @@ index 0000000..25f7abe
 +	hch_wr(sd.smd_tx, HC_FHEAD, 1);
 +	rpm_kick();
 +
++	/*
++	 * Wait for the reply. LK2ND smd.c judges new data by the FIFO index
++	 * difference, not by whether the head moved: if a reply (or an earlier
++	 * queued one) arrived before our index snapshot, "head == snapshot" can
++	 * hold forever and one LDO request would time out while its reply is
++	 * already unread. On the rpm_requests channel there is nothing else on
++	 * our RX side, so any unread bytes are our ack.
++	 */
 +	uint64_t end = deadline_us(200000);
-+	while (hch(sd.smd_rx, HC_HEAD) == rx_before && mach_absolute_time() < end) {
++	uint32_t head_now = 0, got;
++	while ((got = (hch(sd.smd_rx, HC_HEAD) + sd.fifo_sz -
++	    hch(sd.smd_rx, HC_TAIL)) % sd.fifo_sz) == 0) {
++		if (mach_absolute_time() > end) {
++			printf("SWEET SDHC: RPM did not answer req id %u\n", sd.rpm_msg_id);
++			return 0;
++		}
 +	}
-+	uint32_t rx_head = hch(sd.smd_rx, HC_HEAD);
-+	uint32_t got = (rx_head + sd.fifo_sz - rx_before) % sd.fifo_sz;
-+	if (got) {
-+		hch_wr(sd.smd_rx, HC_TAIL, rx_head);    /* consume the reply */
-+		hch_wr(sd.smd_rx, HC_FTAIL, 1);
-+		rpm_kick();
-+	}
++	head_now = hch(sd.smd_rx, HC_HEAD);
++	hch_wr(sd.smd_rx, HC_TAIL, head_now);   /* consume the reply */
++	hch_wr(sd.smd_rx, HC_FTAIL, 1);
++	rpm_kick();
 +	return got;
 +}
 +
@@ -363,7 +383,7 @@ index 0000000..25f7abe
 +	uint32_t a12 = rpm_req(RPM_LDOA, 21, on_2v95, 2);
 +	uint32_t a11 = rpm_req(RPM_LDOA, 13, on_2v95, 2);
 +	if (!a12 || !a11) {
-+		printf("SWEET SDHC: RPM did not acknowledge L12/L11 (%u/%u)\n", a12, a11);
++		printf("SWEET SDHC: RPM did not acknowledge L21/L13 (%u/%u)\n", a12, a11);
 +		return EIO;
 +	}
 +	spin_us(50000);
@@ -385,7 +405,14 @@ index 0000000..25f7abe
 +	return 1;
 +}
 +
-+/* SDCC2 apps RCG: source (0 XO, 1 GPLL0 800 MHz), pre-divider, M/N (0 = bypass). */
++/*
++ * SDCC2 apps RCG: source (0 XO, 1 GPLL0), pre-divider, M/N (0 = bypass).
++ * Out = GPLL0 / prediv with M/N bypass, or GPLL0 * M / (N * prediv) in
++ * dual-edge mode (M/N registers take ~(N-M) and ~N as in LK2ND's
++ * clock_lib2 F() macro). msm8994 GPLL0 runs at 600 MHz (LK2ND
++ * msm8994-clock.c gpll0_clk_src.rate), SDM429 at 800 MHz; sd_card_init
++ * picks the pre-dividers from the "sdpll" boot-arg (MHz, default 600).
++ */
 +static void
 +sd_set_rcg(uint32_t src, uint32_t prediv, uint32_t m, uint32_t n)
 +{
@@ -545,7 +572,13 @@ index 0000000..25f7abe
 +	if ((st & INT_CMD) && !(st & INT_ERR)) {
 +		st = sd_wait(INT_XFER, 5000000 + (uint64_t)len * 4);
 +	}
-+	if (!(st & INT_XFER) || (st & INT_ERR)) {
++	/*
++	 * SDHCI spec: transfer complete outranks a data timeout — with
++	 * both set the data still made it (LK2ND sdhci.c's priority
++	 * table). Data timeout alone (error bit 4 in the error register,
++	 * the upper half of the 32-bit HC_INT view) still fails.
++	 */
++	if (!(st & INT_XFER) || ((st >> 16) & ~ERR_DAT_TIMEOUT)) {
 +		printf("SWEET SDHC: CMD%u arg 0x%x x%u failed: int 0x%x pstate 0x%x\n",
 +		    idx, arg, nblk, st, hc(HC_PSTATE));
 +		sd_reset(2 | 4);
@@ -580,8 +613,13 @@ index 0000000..25f7abe
 +static int
 +sd_card_init(void)
 +{
-+	/* pads: clk 16 mA, cmd/data pull-up 10 mA (Linux sdc2 "active") */
-+	wr32(sd.tlmm + 0x48, 3 << 11 | 3 << 9 | 7 << 6 | 4 << 3 | 4);
++	/*
++	 * sdc2 pads in the SDC2_HDRV_PULL_CTL word (TLMM_BASE + 0x2048):
++	 * clk 16 mA drive without pull, cmd/data 10 mA with pull-up,
++	 * rclk pull-down — the value LK2ND's set_sdc_power_ctrl(2) and
++	 * Linux's "sdc2_*_on" pin states program on the Lumia 950 XL.
++	 */
++	wr32(sd.tlmm + 0x48, 4 | 4 << 3 | 7 << 6 | 3 << 9 | 3 << 11 | 1 << 15);
 +
 +	if (!gcc_branch_on(GCC_AHB_CBCR)) {
 +		printf("SWEET SDHC: SDCC2 AHB clock stays off\n");
@@ -597,7 +635,11 @@ index 0000000..25f7abe
 +	sd_reset(1);
 +	sd_pwr_ack(20000);
 +	hc_wr(HC_INT_EN, 0xffffffff);
-+	hc_wr(HC_CLK, 0x0e << 16 | 0x0001);     /* internal clock, base / 1 */
++	/*
++	 * Internal clock at base / 1, data timeout 0xF = 2^28 SDCLK
++	 * cycles (~5.4 s at 50 MHz, as LK2ND's per-command value).
++	 */
++	hc_wr(HC_CLK, 0x0f << 16 | 0x0001);
 +	uint64_t end = deadline_us(100000);
 +	while (!(hc(HC_CLK) & 2) && mach_absolute_time() < end) {
 +	}
@@ -646,7 +688,23 @@ index 0000000..25f7abe
 +		hc_wr(HC_CTL, hc(HC_CTL) | CTL_4BIT);
 +	}
 +	hc_wr(HC_CTL, hc(HC_CTL) | CTL_ADMA2_32);
-+	sd_clock(1, 16, 1, 2);                  /* GPLL0 800 / 16 = 50, 1/2 = 25 MHz */
++	/*
++	 * Card clock. GPLL0 runs at 600 MHz on msm8994 (LK2ND
++	 * msm8994-clock.c gpll0_clk_src.rate; its 8994 SDCC2 table picks
++	 * 25 MHz = gpll0/12 with M/N 1/2 and 50 MHz = gpll0/12 bypass)
++	 * but 800 MHz on SDM429 (t290), which was proven with /16. Both
++	 * rates yield the same expression: switch frequency = GPLL0 /
++	 * prediv (M/N bypass for 50 MHz) or GPLL0 / prediv * 1/2 (M/N 1/2
++	 * dual-edge for 25 MHz), i.e. prediv = sdpll / 50. Boot-arg
++	 * sdpll=<MHz of GPLL0> (default 600) retargets other boards.
++	 */
++	uint32_t sdpll = 600;
++	PE_parse_boot_argn("sdpll", &sdpll, sizeof(sdpll));
++	uint32_t prediv = sdpll / 50;
++	if (prediv == 0) {
++		prediv = 12;
++	}
++	sd_clock(1, prediv, 1, 2);              /* GPLL0 / prediv, M/N 1/2 = 25 MHz */
 +	sd.mhz = 25;
 +
 +	char name[6] = { (char)(cid[2] >> 24), (char)(cid[2] >> 16), (char)(cid[2] >> 8),
@@ -663,13 +721,13 @@ index 0000000..25f7abe
 +		if (want && sd_xfer(6, 0x80fffff1, 64, 1, false) == 0 &&
 +		    (((const volatile uint8_t *)(sd.dma + DMA_BOUNCE))[16] & 0xf) == 1) {
 +			hc_wr(HC_CTL, hc(HC_CTL) | CTL_HISPD);
-+			sd_clock(1, 16, 0, 0);          /* 50 MHz */
++			sd_clock(1, prediv, 0, 0);          /* GPLL0 / prediv = 50 MHz */
 +			if (sd_rw(0, 1, false) == 0 &&
 +			    memcmp(ref, (const void *)(sd.dma + DMA_BOUNCE), sizeof(ref)) == 0) {
 +				sd.mhz = 50;
 +			} else {
 +				hc_wr(HC_CTL, hc(HC_CTL) & ~CTL_HISPD);
-+				sd_clock(1, 16, 1, 2);
++				sd_clock(1, prediv, 1, 2);
 +				printf("SWEET SDHC: high speed did not read back, staying at 25 MHz\n");
 +			}
 +		}
