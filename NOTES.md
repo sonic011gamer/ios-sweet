@@ -69,6 +69,11 @@ committed with these notes.**
   earlier successful HFS+ mount happened with the wrong (37.5 MHz max)
   clocks and the weaker rpm wait — that mount experience still stands as
   an observation, unknown which error margins were used up.
+- DONE: commit `efc3e8c` (0113 rework + this entry) pushed to
+  origin/t290 (2026-10-27, via the ssh:// URL — the https remote has no
+  credential helper on this host and gh is not installed, so run-id lookup
+  needs the next agent's browser/gh). CI xnu build triggered by the push;
+  download via `gh run download <id> -R sonic011gamer/ios-sweet -n xnu-kernel`.
 
 
 **CORRECTION 2 (2026-10-23 late, post-regression of the MIG story — READ FIRST):
