@@ -10,6 +10,91 @@ observed; not fixed. No recovery reflash needed for staged diagnostic.
 
 ### msm8994 (Lumia 950 XL) handoff — 2026-10-28 (work/xnu patch-stack; read first)
 
+**UPDATE (2026-10-28, night — BOOT-BLOCKER DIAGNOSIS + FIXES F0–F8, build green;
+READ FIRST): `work/xnu` commit `5a4b921` (on top of `aa626d6 from taimen`,
+local only — that remote is Apple's xnu, never push) now carries the msm8994
+target AND the field-parity boot fixes; `./build-linux.sh MSM8994` exit 0,
+kernel `work/build/xnu.obj/DEVELOPMENT_ARM64_MSM8994/kernel.development.msm8994`
+20 091 200 B at 16:11. NOT booted yet — next action is a deck rebuild +
+`fastboot boot`.**
+- **Why it would not boot (no log was ever captured; the following is code
+  trace, not a boot observation):**
+  1. **Early console faulted before any output (primary, added tonight).**
+     `sweet_early_mark(1)` (arm_init.c, MMU on, before arm_vm_init) writes the
+     PRZ header at raw VA 0xd9d00000; the bootstrap V=P map spans
+     [mh_pa, boot_args.memSize) (start.s `x24 -= x18` where x18 = "RAM before
+     the Mach-O header", so the top is exactly memSize), and mkadt's msm8994
+     dram-size = `MSM_MEM_SIZE−MSM_PANEL_SIZE` = **0xbf400000 < 0xd9c00000**
+     (mkadt.py → mkpayload `adt_dram()` → shim loader.c `ba->memSize` →
+     start.s x24). The write translation-faults, the early exception vector
+     spins — **silent hang, zero output.** Field t290 never hits this because
+     it compiles the whole early console out (`#if defined(SWEET) &&
+     !defined(SWEET_T290)`); our chain compiled it in unconditionally.
+  2. **macOS-sized VM pools (earlier fix, boot-92 class):** build-linux.sh
+     sets `PLATFORM=MacOSX` → `XNU_TARGET_OS_OSX` defined → stock 16× RAM
+     compressor pool = 24 GiB at 1.5 GiB RAM → `kmem_range_init` panic, plus
+     the 32/128 GiB macOS zone map. Field gates both with
+     `XNU_PLATFORM_MacOSX/XNU_TARGET_OS_OSX && !SWEET_T290` → iOS sizes.
+- **Fixes applied (all mirrored on the field t290 kernels that boot this deck):**
+  - F0 `makedefs/MakeInc.def`: `-DSWEET_T290=1` restored in
+    `MACHINE_FLAGS_ARM64_MSM8994` (it had been dropped; activates every gate
+    below — chain sources had zero pre-existing SWEET_T290 refs).
+  - F1 `osfmk/vm/vm_compressor.c`: `#if XNU_TARGET_OS_OSX &&
+    !defined(SWEET_T290)` → else branch = iOS pool (1× max_mem, multiplier 1).
+  - F2 `osfmk/kern/zalloc.c`: `#elif XNU_PLATFORM_MacOSX &&
+    !defined(SWEET_T290)` → iOS 8/24 GiB zone map.
+  - F3 `osfmk/vm/vm_kern.c`: ported `sweet_kernel_map_largest_hole()` claim
+    placement (largest-hole `− largest_free_size/32` slack, the helper,
+    `start = sweet_kernel_map_largest_hole()` before `kmem_add_extra_claims()`,
+    success printf) — the field hit `vm_map_locate_space failing for claim
+    kmem_ptr_range_meta` without it (compact kernel VA has one ~45 GB hole).
+  - F4 `osfmk/arm64/machine_routines_asm.s`: 0118 split `ldp/stp` → single
+    8-byte `ldr/str` in `_bcopyin`/`_bcopyout` (msm8994 hardware-faults the
+    16 B pair, esr 0x96000002 — same finding as the field's 0118).
+  - F5 `osfmk/arm/pmap/pmap.c` `region_select == 4`: first extended to
+    MSM8994 (protecting the alias slot from io_submap's "Attempt to demote
+    L2 block"), then **reverted to taimen-only** once F8 removed the aliases —
+    field t290 has no ==4 block and no aliases, so neither do we now.
+  - F6 `pexpert/pexpert/arm64/MSM8994.h`: `#undef SWEET_SMP_MAX_CPUS /
+    #define 4` (field t290 clamp; 8-core PSCI CPU_ON on the Lumia is
+    unverified — drop the override to experiment).
+  - F7 `iokit/Kernel/arm/SweetCPU.cpp`: chain's unconditional
+    `phys_id != 0` panic replaced with the field t290 boot-CPU consistency
+    check under `#if defined(SWEET_T290)`.
+  - **F8 (tonight): early console compiled out for SWEET_T290** —
+    `sweet_early.c` body and `sweet_early.h` declarations gated
+    `SWEET && !SWEET_T290`, header #else gained field-style static-inline
+    stubs for EVERY ungated caller (mark/putc/log_putc/panic/relocate/hex →
+    arm_init.c, arm_vm_init.c, debug.c panic path, pe_serial.c mirror,
+    pe_fiq.c GIC hex dumps); `arm_vm_init.c` map_final/relocate calls + the
+    SWEET_EARLY_FB_VA block gated the same way. Taimen builds unchanged
+    (SWEET_T290 is only defined for MSM8994). **Cost:** no xnu→pstore log
+    copy pre-console anymore; capture = shim/pstore markers (written MMU-off,
+    unaffected) + fbcon on screen. Re-enabling later needs (a) zone inside
+    the V=P window (memSize ≥ ~0xd9e00000 — check shim's
+    `ramdisk overlaps kernel memory` test first, it is `rd_start <
+    phys_base+mem_size`), (b) F5's region==4 extension back, (c) F8's gates
+    opened.
+- Build verification: exit 0, zero fatal errors; binary markers
+  `strings`-checked: `SWEET EARLY` ×0 (F8 really out), `SWEET kmem: claims
+  from` ×1 (F3), `expected boot CPU = ADT cpu0` ×1 (F7). Gotcha found the
+  hard way: a `#include <stdarg>` typo I wrote into sweet_early.h only
+  surfaced on the *bootstrap* sub-build (that target had been stale since
+  08:22) — header edits can wake targets the main build had settled, and
+  build-linux.sh prints no "BUILD EXIT" line, use the script's exit status.
+  Flag changes (-D…) still do NOT trigger recompiles: wipe
+  `work/build/xnu.obj/DEVELOPMENT_ARM64_MSM8994` for those; header/source
+  changes rebuild incrementally fine.
+- Deliberate remaining divergences from field (all cosmetic/deferred):
+  field's SweetFramebuffer/pe_serial t290 fbcon shadow blocks and
+  `serial_console` `sweet_t290_pstore_init` were not ported (the latter
+  needs the absent `sweet_log_copy`/`sweet_log_position` API).
+- **NEXT: `mkboot` deck rebuild → `fastboot boot` (temporary only; preserve
+  Android/partitions/backups per AGENTS.md).** If it fails: pull pstore for
+  the shim's markers and photograph the fbcon screen — pre-console xnu text
+  no longer exists by design (F8). Then triage in roughly: driver probe/root
+  mount (sweet_sdhc/sweet_ufs + `sdpll=600` default), then the rest.
+
 **UPDATE (2026-10-28): `/home/snaccy/iOS/xnu-linux-build/work/xnu` (Linux
 build harness work tree, base 1b191cb) is now fully patched: ios-taimen chain
 0001–0331 + ios-sweet's 0113 sdhc + the harness's own patches. Requested by
