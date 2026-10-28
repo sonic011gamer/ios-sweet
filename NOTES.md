@@ -71,6 +71,62 @@ work/xnu". Not built, not tested.**
   agent. New-file additions from the port patches show as untracked.
 
 
+**UPDATE (2026-10-28, later): msm8994 MACHINE_CONFIG target added to
+work/xnu (modeled on ios-taimen's 0184-taimen-board-config) and verified by
+a full Linux build: `./build-linux.sh MSM8994` → `BUILD EXIT: 0`,
+`work/build/xnu.obj/DEVELOPMENT_ARM64_MSM8994/kernel.development.msm8994`
+(20 092 208 B; arg 2 defaults to DEVELOPMENT).**
+- Target surface (taimen's 7-file recipe): `makedefs/MakeInc.def`
+  (supported-configs list, `MACHINE_FLAGS_ARM64_MSM8994`, arm64e-exclusion
+  filter, compact -128 GB layout block widened from `ifeq ...TAIMEN` to a
+  TAIMEN/MSM8994 filter), `config/MASTER.arm64.msm8994` (copy of sweet's),
+  `bsd/conf/Makefile.template` + `libkern/conf/Makefile.template`
+  (`SWEET TAIMEN MSM8994` provider filters), `pexpert/pexpert/arm64/
+  Makefile` + `board_config.h`, new `pexpert/pexpert/arm64/MSM8994.h`.
+- `MACHINE_FLAGS_ARM64_MSM8994 = -DARM64_BOARD_CONFIG_SWEET
+  -DARM64_BOARD_CONFIG_MSM8994 -DSWEET_T290=1 -march=armv8-a+crc+crypto
+  -mcpu=cortex-a53` — exactly the field kernel's flags (ios-sweet's 0101
+  `SWEET_BOARD=t290` block) plus the board define; `-DSWEET_T290=1` keeps
+  the port-series code gates (0113's `sweet_sdhc`) matching the kernels the
+  Lumia boots with today.
+- `MSM8994.h` (TAIMEN.h style): `#undef __ARM_16K_PG__` (A57/A53 = 4K/64K
+  granules only), `#undef HAS_GIC_V3` + `#define HAS_GIC_V2 1` (GIC-450),
+  `__ARM64_PMAP_SUBPAGE_L1__ 1` (16K VM pages on the 4K granule,
+  PAGE_RATIO 4), CNTV fallback INTID 20 (vt20 decks; the ADT's
+  `virtual-timer-intid` overrides at runtime), and the Lumia pstore zone
+  `SWEET_EARLY_LOG_BLOCK 0xd9c00000` / `PRZ 0xd9d00000` — mkadt.py's
+  `sweet-ramoops` node (1 MiB at 0xd9d00000 inside the 0xd9c00000 block the
+  phone's own DT reserves; fits below the 1.5 GiB map end 0xe0000000).
+- GICv2 interrupt path ported from the field-proven ios-sweet 0101 (this
+  taimen chain has none — its sleh/start.s use the ICC system registers
+  unconditionally): `pe_fiq.c` `#elif HAS_GIC_V2` pe_init_fiq (GICD/GICC
+  from DT `/arm-io/gic` reg, `virtual-timer-intid` override, GICD_SGIR
+  SGI), `sleh.c` ack/EOI via `sweet_gic_ack/eoi` + `GICC_IAR_INTID_MASK`,
+  `SweetCPU.cpp` signalCPU → `sweet_gic_send_sgi`, `start.s` gates
+  `ICC_SRE_EL2` behind `HAS_GIC_V3` (the MRS UNDEFs on v2), `vm_param.h`
+  38-bit `MACH_VM_MAX_ADDRESS_RAW`, `protos.h` prototypes.
+- **One piece had to be written, not ported:** `sweet_spi_attach/mask/
+  dispatch` (sailfish 0181's device-SPI machinery that sweet_touch,
+  sailfish_wlan and sleh_irq link against) lives inside the `#if
+  HAS_GIC_V3` block of `pe_fiq.c` and routes SPIs with the v3-only
+  `GICD_IROUTER`; the v2 region got its own variant routing via
+  `GICD_ITARGETSR` with the attaching CPU's recorded interface mask
+  (configure/enable sequence otherwise v2-identical). This was the only
+  link failure of the whole build (4 undefined symbols), fixed at the
+  first retry.
+- Open for bring-up (out of the requested "basic, no gpu/fancy" scope): SMP
+  stays SWEET's homogeneous 8 — the FIELD t290 kernels clamped
+  `SWEET_SMP_MAX_CPUS` to 4, so 8-core PSCI CPU_ON bring-up on the Lumia is
+  unverified; none of the taimen chain's GIC-diag/early-screen/panel gates
+  were carried over; kernel NOT booted yet (next: same cmdline + vt20 ADT,
+  `mkboot` deck → `fastboot boot`).
+- Note: `work/build/xnu.board` now reads `DEVELOPMENT|ARM64|MSM8994|` and
+  the objroot holds MSM8994 objects — a SWEET build wipes and rebuilds
+  (harness knob-stamp behavior). In work/xnu's own git the target is one
+  commit on top of `aa626d6 from taimen`; work/xnu's remote is Apple's xnu
+  — commit locally, never push.
+
+
 **UPDATE (2026-10-27): `xnu/patches/0113-t290-sdhc-root.patch` (sdhc2 microSD
 root) fully cross-checked against the proven LK2ND Lumia-950 drivers
 (`/home/snaccy/Lumia950/lk2nd/`) and the real Lumia octagon DTB, then improved;
