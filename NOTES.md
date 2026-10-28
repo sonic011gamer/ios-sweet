@@ -8,7 +8,54 @@ shows almost black lock screen. Bounded shader/texture trace bridge staged
 on SD, awaiting next manual iPadOS boot. Kernel monotonic-time panic also
 observed; not fixed. No recovery reflash needed for staged diagnostic.
 
-### msm8994 (Lumia 950 XL) handoff — 2026-10-27 (0113 sdhc rework; read first)
+### msm8994 (Lumia 950 XL) handoff — 2026-10-28 (work/xnu patch-stack; read first)
+
+**UPDATE (2026-10-28): `/home/snaccy/iOS/xnu-linux-build/work/xnu` (Linux
+build harness work tree, base 1b191cb) is now fully patched: ios-taimen chain
+0001–0331 + ios-sweet's 0113 sdhc + the harness's own patches. Requested by
+the user: "apply the sdhc commit and the ios-taimen patches first, on top of
+work/xnu". Not built, not tested.**
+- Order used (matches the harness `patch_tree()` order): port chain first,
+  then 0113, then `xnu-linux-build/patches/0200–0206`, then impl-methods.
+  - **ios-taimen 0001–0331: all 331 applied, 0 failures** — but only after
+    staging `bsd/sweet_hfs/` per 0026's recipe from pristine
+    hfs@`31d5ec238dfab485e78a9a30b8b92d13e8914f03` (network fetch verified;
+    the AppleKeyStore `#if CONFIG_PROTECT` edits applied as in the script;
+    `TargetConditionals.h` from the local staged copy). Gotcha found: the
+    three LOCAL `sweet_hfs` staging copies on this host (xnu-linux/xnu,
+    ios-cityman2/research/w8796, ios-linux/xnu-ci) are identical but have
+    0031's dirty-root block baked into `hfs_vfsutils.c`, so 0031 can never
+    apply against them — only a fresh pristine fetch works. Stage scripts
+    0019/0020/0175 NOT run (need `xcrun`); harmless — no applied patch
+    depends on their outputs (all three staged dirs are 0 files).
+  - **0113 (sdhc) applied as three parts**: new-file hunk + the
+    `IOKitBSDInit.cpp` hunk apply VERBATIM after the taimen chain; only the
+    `bsd/conf/files` hunk needed context adaptation because the taimen chain
+    has no `sweet_vblk.c` (ios-sweet-only virtio) — the `+sweet_sdhc` line
+    now lands directly after `sweet_ufs`. Resulting `bsd/dev/sweet_sdhc.c`
+    is byte-identical to the canonical driver from `efc3e8c` (29719 B).
+  - Harness pieces re-applied because the tree had been reset to pristine
+    while `work/.patched` (Oct 25, SWEET/t290 build) survived: `patches/
+    0200–0206` all check+apply clean on top of taimen, and impl-methods was
+    REGENERATED against this tree (`tools/inject-impl-methods.py`); the old
+    t290-generated patch is kept as `work/impl-methods.patch.t290-backup`.
+- **Verification**: full strict replay in a scratch clone — hfs stage → all
+  taimen patches in numeric order (incl. 0031/0041) → the three 0113 parts
+  — `diff -r` against work/xnu is empty except pre-existing empty
+  placeholder dirs (`bsd/pthread/sweet_libpthread`, `libkern/crypto/
+  sweet_bearssl`, both 0 files) and `.vscode`.
+- **HAZARD — do not delete `work/.patched`**: `build-linux.sh`'s
+  `patch_tree()` wipes `work/xnu` (`git reset --hard` + `git clean -fd`)
+  whenever `.patched` is absent, then re-patches from `XNU_PATCH_DIR` only —
+  0113 lives solely in ios-sweet's series and would be lost (or the taimen
+  series, if `XNU_PROJECT` points there). With `.patched` present the harness
+  skips re-patching and this hand-applied stack survives into the build.
+  `work/build/xnu.board` still records the old run (`DEVELOPMENT|ARM64|
+  SWEET|t290`) — it will be rewritten by the next build.
+- Uncommitted by design: work/xnu is gitignored harness state (README:
+  "The build ... stays inside work/"), meant for `git diff` by the next
+  agent. New-file additions from the port patches show as untracked.
+
 
 **UPDATE (2026-10-27): `xnu/patches/0113-t290-sdhc-root.patch` (sdhc2 microSD
 root) fully cross-checked against the proven LK2ND Lumia-950 drivers
