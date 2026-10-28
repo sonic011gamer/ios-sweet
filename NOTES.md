@@ -25,9 +25,20 @@ work/xnu". Not built, not tested.**
     three LOCAL `sweet_hfs` staging copies on this host (xnu-linux/xnu,
     ios-cityman2/research/w8796, ios-linux/xnu-ci) are identical but have
     0031's dirty-root block baked into `hfs_vfsutils.c`, so 0031 can never
-    apply against them — only a fresh pristine fetch works. Stage scripts
-    0019/0020/0175 NOT run (need `xcrun`); harmless — no applied patch
-    depends on their outputs (all three staged dirs are 0 files).
+    apply against them — only a fresh pristine fetch works.
+  - **All four stage scripts now run too** (user count check: `git status
+    -uall` was 280 without them vs their usual 300+; now **386**). 0019
+    libpthread@a6c70ca and 0020 bearssl@7bea48e ran as-is via the harness's
+    `tools/bin/xcrun` shim + `XNU_SDK_PATH=work/sdk` (empty placeholder dirs
+    had to be deleted first: the scripts' `refusing to overwrite` guards
+    trip on them, and they held 0 files). 0175 IONetworking@f9f7e57 was
+    replicated by hand because its BSD-only `sed -i ''` breaks on GNU sed —
+    **hazard: `build-linux.sh` is `set -e` and runs stages without `|| true`,
+    so a FRESH patch_tree pointed at the taimen series would die at
+    0175-stage** (the ios-sweet series has no 0175, which is why Oct 25 was
+    fine). With the current tree + `.patched` the stages are already done and
+    never re-run. Staged counts: libpthread 42, bearssl 30, ionetworking 34,
+    hfs 78 files.
   - **0113 (sdhc) applied as three parts**: new-file hunk + the
     `IOKitBSDInit.cpp` hunk apply VERBATIM after the taimen chain; only the
     `bsd/conf/files` hunk needed context adaptation because the taimen chain
@@ -42,8 +53,11 @@ work/xnu". Not built, not tested.**
 - **Verification**: full strict replay in a scratch clone — hfs stage → all
   taimen patches in numeric order (incl. 0031/0041) → the three 0113 parts
   — `diff -r` against work/xnu is empty except pre-existing empty
-  placeholder dirs (`bsd/pthread/sweet_libpthread`, `libkern/crypto/
-  sweet_bearssl`, both 0 files) and `.vscode`.
+  placeholder dirs (both since replaced by real staging) and `.vscode`.
+  File-level completeness: every path touched by all 331 taimen patches +
+  0113 + 0200–0206 (195 distinct `+++ b/` targets) exists in work/xnu,
+  0 missing; no patch-deleted file survives (user count check: 331 patches
+  = 386 `git status -uall` entries now, 280 before the stage scripts ran).
 - **HAZARD — do not delete `work/.patched`**: `build-linux.sh`'s
   `patch_tree()` wipes `work/xnu` (`git reset --hard` + `git clean -fd`)
   whenever `.patched` is absent, then re-patches from `XNU_PATCH_DIR` only —
